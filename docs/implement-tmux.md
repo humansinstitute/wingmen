@@ -12,7 +12,7 @@ Wingman should spawn every agent subprocess inside tmux so operators can attach 
 1. **tmux prerequisite check**: During startup, verify `tmux` exists and expose a clear error (`wingman requires tmux >= 3.2`).
 2. **Single controller session**: Create (or reuse) a tmux session named `wingman-agents`. All agent subprocesses run as windows within this controller session instead of creating one tmux session per agent.
 3. **Deterministic window naming**: Use `SESSION_ID` plus the agent type to form the window name (e.g., `codex:1a2b3c4d`). This keeps `tmux list-windows -t wingman-agents` tidy and makes window discovery simple.
-4. **Embed metadata**: Set tmux window options and environment variables so downstream tooling can read structured details (agent, working directory, PID, port).
+4. **Single source of truth**: Keep every agent window inside the shared session so operators have one place to inspect and attach without extra metadata plumbing.
 5. **Graceful cleanup**: When a Wingman session stops, close the corresponding tmux window; when the tmux server exits, ensure Wingman releases ports and updates state.
 
 ## Implementation Steps
@@ -40,39 +40,27 @@ Wingman should spawn every agent subprocess inside tmux so operators can attach 
     '-t', 'wingman-agents',
     '-n', `${session.agent}:${session.id.slice(0, 8)}`,
     '--',
-    ...session.command,
+    'bash',
+    '-lc',
+    shellescape(session.command),
   ];
   ```
-- Capture the pane ID from `tmux display-message -p '#{pane_id}'` if we need to map agent sessions to panes precisely.
-- Store the tmux target (window name or pane ID) in `ProcessManager` so stop/cleanup routines can address the correct window.
+- Wrap the agent command in a login shell (or helper that mimics `bash -lc`) so argv quoting, environment expansion, and PATH resolution behave like the existing `Bun.spawn`. Implement a small adapter (e.g., a `shellescape` helper) that produces a safe string suitable for passing through the shell.
+- Capture the pane ID or PID from `tmux display-message -p '#{pane_id}'` to map agent sessions back to `ProcessManager`. Record it alongside the session so stop/cleanup routines target the right window.
+- Wire the adapter so `ProcessManager` can still observe exit codes: wait on the tmux pane (e.g., `tmux wait-for` or poll `list-panes`) and propagate failures back to the orchestrator just as the direct spawn did.
 
-### 4. Attach Metadata for Discoverability
-- After creating the window, set tmux-specific metadata:
-  ```bash
-  tmux set-environment -t wingman-agents SESSION_ID <id>
-  tmux set-option -t wingman-agents:codex-1a2b3c4d@ window-status-format '#{?#{==:#{pane_id},%pane_id},* ,}#{pane_title}'
-  ```
-- Prefer tmux `set-environment -t wingman-agents <key> <value>` for global details and `run-shell` with `tmux set-option -t <window>` for window-scoped labels.
-- Consider storing JSON in `@wingman_metadata` window option (tmux supports user options prefixed with `@`). Downstream tools can read it via `tmux show-option -vw @wingman_metadata`.
-- Suggested payload:
-  ```json
-  {
-    "sessionId": "…",
-    "agent": "codex",
-    "port": 3710,
-    "workingDirectory": "/Users/mini/code/project"
-  }
-  ```
+### 4. Keep tmux as the Control Plane
+- All agent panes live inside the `wingman-agents` session; no additional metadata or environment shims are required.
+- Downstream tooling attaches to that session and relies on tmux’s own window naming to identify the target agent. Maintaining deterministic names keeps discovery simple without custom payloads.
 
 ### 5. Update Stop & Cleanup Paths
-- When `stopSession` runs, issue `tmux kill-window -t wingman-agents:${windowName}` before (or after) signalling the agent. Ensure the order leaves the agent process enough time to exit gracefully.
+- When `stopSession` runs, send the normal termination signal to the agent, wait for its exit (with a timeout), then issue `tmux kill-window -t wingman-agents:${windowName}` to clean up the pane.
 - If an agent terminates on its own, watch for the `pane_dead` event (poll with `tmux list-panes`) or fall back to the process exit promise. Once detected, call `kill-window` to tidy up.
 - On orchestrator shutdown (`ctrl+c`), send `tmux kill-session -t wingman-agents` so any lingering windows disappear and metadata is cleared. Afterwards Wingman should release all allocated ports.
 
 ### 6. CLI Integration
 - Teach `wingman cli` to read the tmux session instead of shelling out to `ps`:
   - List windows: `tmux list-windows -t wingman-agents -F '#{window_name} #{window_id}'`.
-  - Fetch metadata via `show-option -vw @wingman_metadata` per window.
   - Attach by running `tmux attach-session -t wingman-agents` (default to the latest window) or `tmux attach -t wingman-agents:${windowName}` for a specific agent.
 - Provide an ergonomic alias like `wingman cli attach <session-id>` that maps to `tmux attach -t wingman-agents:<short-id>`.
 
@@ -82,9 +70,9 @@ Wingman should spawn every agent subprocess inside tmux so operators can attach 
 - Optionally add a tmux hook that announces new agent windows (e.g., using `display-message`) so operators know when fresh sessions spin up.
 
 ## Edge Cases & Follow-Up Tasks
-- Handle long session IDs by truncating window names (`slice(0, 8)`) while keeping the full ID in metadata.
+- Handle long session IDs by truncating window names (`slice(0, 8)`) while keeping the full ID in orchestrator state so lookups remain unambiguous.
 - Ensure agent commands that already start tmux or expect a TTY still behave correctly—if they require a login shell, pass `tmux new-window … -- bash -lc '<command>'`.
 - Document tmux keyboard shortcuts (`Ctrl+b d` to detach) in the CLI help so operators unfamiliar with tmux can exit safely.
 - Decide what happens when tmux restarts independently (e.g., after upgrade). Wingman should detect the missing session and recreate it, possibly by reparenting running agents or forcing a restart.
 
-This plan keeps tmux as a first-class dependency, gives Wingman full control over the multiplexer lifecycle, and packages rich metadata so auxiliary tooling can provide a polished attach/detach experience without shell-level wrapper scripts.
+This plan keeps tmux as a first-class dependency, gives Wingman full control over the multiplexer lifecycle, and relies on tmux’s native window management to deliver a straightforward attach/detach flow without extra wrapper scripts.

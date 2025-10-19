@@ -11,6 +11,7 @@ dist
 *.tgz
 tmp/
 data
+agentapi
 
 # code coverage
 coverage
