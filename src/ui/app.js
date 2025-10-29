@@ -4671,8 +4671,6 @@ const sendMessage = async (sessionId, content) => {
   } catch (error) {
     console.error("Failed to send agent message", error);
     window.alert("Failed to send message to agent. Check console for details.");
-  } finally {
-    applySessionStatusOverride(sessionId, null);
   }
 };
 
