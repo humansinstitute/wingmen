@@ -4636,6 +4636,7 @@ const sendMessage = async (sessionId, content) => {
   }
 
   applySessionStatusOverride(sessionId, "working");
+  updateSessionStatusIndicator(sessionId);
   try {
     const response = await fetch(`/api/sessions/${sessionId}/messages`, {
       method: "POST",
