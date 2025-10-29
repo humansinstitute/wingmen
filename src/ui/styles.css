@@ -737,7 +737,6 @@ body[data-menu-open="true"] .wm-menu-panel {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.4rem;
-  color: var(--accent-primary);
 }
 
 .wm-app-git__controls .wm-select {
@@ -745,6 +744,10 @@ body[data-menu-open="true"] .wm-menu-panel {
   width: auto;
   max-width: 12rem;
   white-space: nowrap;
+}
+
+.wm-app-git__controls .wm-button-icon {
+  color: var(--text-secondary);
 }
 
 .wm-app-git__controls .wm-button-icon .wm-icon {
@@ -886,6 +889,17 @@ body[data-menu-open="true"] .wm-menu-panel {
   width: 1.35rem;
   height: 1.35rem;
   display: block;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  border: 0;
 }
 
 .wm-button-icon .wm-icon {

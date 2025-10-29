@@ -1159,7 +1159,14 @@ const setIconButton = (button, iconKey, label) => {
   while (button.firstChild) {
     button.removeChild(button.firstChild);
   }
-  button.append(createIconSvg(definition));
+  const icon = createIconSvg(definition);
+  button.append(icon);
+  if (label) {
+    const srOnly = document.createElement("span");
+    srOnly.className = "sr-only";
+    srOnly.textContent = label;
+    button.append(srOnly);
+  }
   if (label) {
     button.setAttribute("aria-label", label);
     button.title = label;
