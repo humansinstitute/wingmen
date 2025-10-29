@@ -5655,6 +5655,11 @@ const renderAppCard = (app) => {
 
   card.append(statusInfo);
 
+  const gitSection = renderAppGitSection(app);
+  if (gitSection) {
+    card.append(gitSection);
+  }
+
   card.append(renderAppLogPreview(app.logs));
 
   const actions = document.createElement("div");
