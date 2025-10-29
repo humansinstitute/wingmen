@@ -3001,6 +3001,12 @@ const appDialog = document.getElementById("app-dialog");
 const appForm = appDialog?.querySelector("form") ?? null;
 const appDialogTitle = document.getElementById("app-dialog-title");
 const appLabelInput = document.getElementById("app-label");
+const appSetupModeInputs = appDialog ? appDialog.querySelectorAll('input[name="app-setup-mode"]') : null;
+const appCloneFields = document.getElementById("app-clone-fields");
+const appCloneUrlInput = document.getElementById("app-clone-url");
+const appCloneNameInput = document.getElementById("app-clone-name");
+const appCloneDirectoryInput = document.getElementById("app-clone-directory");
+const appCloneBrowseButton = document.getElementById("app-clone-browse");
 const appRootInput = document.getElementById("app-root");
 const appRootBrowseButton = document.getElementById("app-root-browse");
 const appTmuxInput = document.getElementById("app-tmux-session");
@@ -5064,6 +5070,9 @@ const appDialogState = {
   appId: null,
 };
 
+const APP_SETUP_EXISTING = "existing";
+const APP_SETUP_CLONE = "clone";
+
 const deriveAppWindowName = (labelValue, rootValue) => {
   const label = (labelValue ?? "").trim();
   const root = (rootValue ?? "").trim();
@@ -5088,6 +5097,64 @@ const updateAppWindowPreview = () => {
   const label = appLabelInput?.value ?? "";
   const root = appRootInput?.value ?? "";
   appTmuxWindowInput.value = deriveAppWindowName(label, root);
+};
+
+const getAppSetupMode = () => {
+  const inputs = appSetupModeInputs ? Array.from(appSetupModeInputs) : [];
+  const selected = inputs.find((input) => input instanceof HTMLInputElement && input.checked);
+  return selected?.value === APP_SETUP_CLONE ? APP_SETUP_CLONE : APP_SETUP_EXISTING;
+};
+
+const joinPathSegments = (parentRaw, childRaw) => {
+  const parent = parentRaw?.trim();
+  const child = childRaw?.trim();
+  if (!parent || !child) return "";
+  const separator = parent.includes("\\") && !parent.includes("/") ? "\\" : "/";
+  const trimmedParent = parent.replace(/[\\/]+$/, "");
+  return `${trimmedParent}${separator}${child}`;
+};
+
+const updateCloneTargetPath = () => {
+  if (getAppSetupMode() !== APP_SETUP_CLONE) {
+    return;
+  }
+  const directory = appCloneDirectoryInput?.value ?? "";
+  const name = appCloneNameInput?.value ?? "";
+  const target = joinPathSegments(directory, name);
+  if (appRootInput) {
+    appRootInput.value = target;
+  }
+  if (target) {
+    updateAppWindowPreview();
+  }
+};
+
+const syncAppSetupMode = () => {
+  const mode = getAppSetupMode();
+  const cloning = mode === APP_SETUP_CLONE;
+  if (appCloneFields) {
+    appCloneFields.hidden = !cloning;
+  }
+  if (appRootInput) {
+    appRootInput.readOnly = cloning;
+    if (!cloning) {
+      appRootInput.removeAttribute("readonly");
+    }
+  }
+  if (appRootBrowseButton) {
+    appRootBrowseButton.disabled = cloning;
+  }
+  if (appDiscoverButton) {
+    appDiscoverButton.disabled = cloning;
+  }
+  updateCloneTargetPath();
+};
+
+const collectCloneFormValues = () => {
+  const url = appCloneUrlInput?.value?.trim() ?? "";
+  const name = appCloneNameInput?.value?.trim() ?? "";
+  const directory = appCloneDirectoryInput?.value?.trim() ?? "";
+  return { url, name, directory, target: joinPathSegments(directory, name) };
 };
 
 const setAppDialogSubmitting = (submitting) => {
@@ -5130,6 +5197,56 @@ if (appRootInput) {
     updateAppWindowPreview();
   });
 }
+
+if (appSetupModeInputs) {
+  appSetupModeInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      syncAppSetupMode();
+    });
+  });
+}
+
+appCloneDirectoryInput?.addEventListener("input", () => {
+  updateCloneTargetPath();
+});
+
+appCloneNameInput?.addEventListener("input", () => {
+  if (getAppSetupMode() === APP_SETUP_CLONE) {
+    const provided = appCloneNameInput.value.trim();
+    if (provided && appLabelInput && appLabelInput.value.trim().length === 0) {
+      appLabelInput.value = provided;
+    }
+  }
+  updateCloneTargetPath();
+  if (getAppSetupMode() === APP_SETUP_EXISTING) {
+    updateAppWindowPreview();
+  }
+});
+
+appCloneBrowseButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  const seed =
+    appCloneDirectoryInput?.value?.trim() ||
+    appRootInput?.value?.trim() ||
+    state.lastWorkingDirectory ||
+    state.config?.defaultDirectory ||
+    "";
+  void openDirectoryBrowser({
+    initialPath: seed,
+    title: "Select Parent Directory",
+    confirmLabel: "Use This Directory",
+    allowCreate: true,
+    onSelect: (path) => {
+      if (appCloneDirectoryInput) {
+        appCloneDirectoryInput.value = path;
+      }
+      state.lastWorkingDirectory = path;
+      updateCloneTargetPath();
+    },
+  });
+});
+
+syncAppSetupMode();
 
 appRootBrowseButton?.addEventListener("click", (event) => {
   event.preventDefault();
@@ -5178,6 +5295,23 @@ const resetAppDialog = () => {
   if (appNotesInput) {
     appNotesInput.value = "";
   }
+  if (appCloneUrlInput) {
+    appCloneUrlInput.value = "";
+  }
+  if (appCloneNameInput) {
+    appCloneNameInput.value = "";
+  }
+  if (appCloneDirectoryInput) {
+    appCloneDirectoryInput.value = "";
+  }
+  if (appSetupModeInputs) {
+    appSetupModeInputs.forEach((input) => {
+      if (input instanceof HTMLInputElement) {
+        input.checked = input.value === APP_SETUP_EXISTING;
+      }
+    });
+  }
+  syncAppSetupMode();
   appDialogState.mode = "create";
   appDialogState.appId = null;
 };
@@ -5208,6 +5342,14 @@ const populateAppDialog = (app) => {
     if (!input) return;
     input.value = app.scripts?.[action] ?? "";
   });
+  if (appSetupModeInputs) {
+    appSetupModeInputs.forEach((input) => {
+      if (input instanceof HTMLInputElement) {
+        input.checked = input.value === APP_SETUP_EXISTING;
+      }
+    });
+  }
+  syncAppSetupMode();
 };
 
 const collectAppFormValues = () => {
@@ -5230,6 +5372,54 @@ const collectAppFormValues = () => {
 const handleAppFormSubmit = async (event) => {
   event.preventDefault();
   const values = collectAppFormValues();
+  const setupMode = getAppSetupMode();
+
+  let clonePayload = null;
+  if (setupMode === APP_SETUP_CLONE) {
+    const cloneValues = collectCloneFormValues();
+    if (!cloneValues.url) {
+      window.alert("Provide a repository URL to clone.");
+      appCloneUrlInput?.focus();
+      return;
+    }
+    if (!cloneValues.name) {
+      window.alert("Provide a folder name for the cloned app.");
+      appCloneNameInput?.focus();
+      return;
+    }
+    if (/[\\/]/.test(cloneValues.name)) {
+      window.alert("Folder name cannot contain path separators.");
+      appCloneNameInput?.focus();
+      return;
+    }
+    if (!cloneValues.directory) {
+      window.alert("Select a parent directory for the clone.");
+      appCloneDirectoryInput?.focus();
+      return;
+    }
+    if (!cloneValues.target) {
+      window.alert("Unable to determine the app root path. Check the clone settings.");
+      appCloneNameInput?.focus();
+      return;
+    }
+    if (appRootInput) {
+      appRootInput.value = cloneValues.target;
+    }
+    values.root = cloneValues.target;
+    if (!values.label && cloneValues.name) {
+      values.label = cloneValues.name;
+      if (appLabelInput) {
+        appLabelInput.value = cloneValues.name;
+      }
+    }
+    clonePayload = {
+      directory: cloneValues.directory,
+      url: cloneValues.url,
+      name: cloneValues.name,
+    };
+    updateAppWindowPreview();
+  }
+
   if (!values.root) {
     window.alert("Provide a root directory for the app.");
     appRootInput?.focus();
@@ -5273,6 +5463,33 @@ const handleAppFormSubmit = async (event) => {
 
   setAppDialogSubmitting(true);
   try {
+    if (clonePayload) {
+      const response = await fetch("/api/docs/git", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          action: "clone",
+          directory: clonePayload.directory,
+          url: clonePayload.url,
+          name: clonePayload.name,
+        }),
+      });
+      let cloneData = {};
+      try {
+        cloneData = await response.json();
+      } catch {
+        cloneData = {};
+      }
+      if (!response.ok) {
+        const message =
+          typeof cloneData?.error === "string" && cloneData.error.length > 0
+            ? cloneData.error
+            : response.statusText || "Failed to clone repository";
+        throw new Error(message);
+      }
+      state.lastWorkingDirectory = clonePayload.directory;
+    }
+
     const response = await fetch(url, {
       method,
       headers: { "content-type": "application/json" },

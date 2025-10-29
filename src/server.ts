@@ -421,7 +421,7 @@ type GitRepositorySummary = {
   worktreeError: string | null;
 };
 
-type GitCommandAction = "init" | "addAll" | "commit" | "push" | "pushUpstream";
+type GitCommandAction = "init" | "addAll" | "commit" | "push" | "pushUpstream" | "clone";
 
 const executeGitCommand = async (options: {
   directory: string;
@@ -429,6 +429,8 @@ const executeGitCommand = async (options: {
   message?: string | null;
   remote?: string | null;
   branch?: string | null;
+  url?: string | null;
+  targetDirectoryName?: string | null;
 }): Promise<CommandResult> => {
   const directory = options.directory;
   const action = options.action;
@@ -464,6 +466,18 @@ const executeGitCommand = async (options: {
         throw new Error("Branch name is required to set upstream");
       }
       return runCommand("git", ["push", "-u", remote, branch], { cwd: directory });
+    }
+    case "clone": {
+      const repositoryUrl = options.url?.trim();
+      if (!repositoryUrl) {
+        throw new Error("Repository URL is required");
+      }
+      const args = ["clone", repositoryUrl];
+      const targetName = options.targetDirectoryName?.trim();
+      if (targetName) {
+        args.push(targetName);
+      }
+      return runCommand("git", args, { cwd: directory });
     }
     default:
       throw new Error("Unsupported git command");
@@ -3548,6 +3562,12 @@ const handleApi = async (
     const messageInput = normaliseOptionalString((payload as Record<string, unknown>).message);
     const remoteInput = normaliseOptionalString((payload as Record<string, unknown>).remote);
     const branchInput = normaliseOptionalString((payload as Record<string, unknown>).branch);
+    const urlInput =
+      normaliseOptionalString((payload as Record<string, unknown>).url) ??
+      normaliseOptionalString((payload as Record<string, unknown>).repository);
+    const nameInput =
+      normaliseOptionalString((payload as Record<string, unknown>).name) ??
+      normaliseOptionalString((payload as Record<string, unknown>).target);
 
     if (!directoryInput) {
       return Response.json({ error: "Directory is required" }, { status: 400 });
@@ -3557,7 +3577,7 @@ const handleApi = async (
       return Response.json({ error: "Action is required" }, { status: 400 });
     }
 
-    if (!["init", "addAll", "commit", "push", "pushUpstream"].includes(actionInput)) {
+    if (!["init", "addAll", "commit", "push", "pushUpstream", "clone"].includes(actionInput)) {
       return Response.json({ error: "Unsupported git action" }, { status: 400 });
     }
 
@@ -3568,6 +3588,25 @@ const handleApi = async (
       return Response.json({ error: (error as Error).message }, { status: 400 });
     }
 
+    if (actionInput === "clone") {
+      if (!urlInput) {
+        return Response.json({ error: "Repository URL is required" }, { status: 400 });
+      }
+
+      if (nameInput && /[\\/]/.test(nameInput)) {
+        return Response.json({ error: "Folder name cannot contain path separators" }, { status: 400 });
+      }
+
+      try {
+        const stats = await stat(directory);
+        if (!stats.isDirectory()) {
+          return Response.json({ error: `Path is not a directory: ${directory}` }, { status: 400 });
+        }
+      } catch {
+        return Response.json({ error: `Directory not found: ${directory}` }, { status: 400 });
+      }
+    }
+
     try {
       const result = await executeGitCommand({
         directory,
@@ -3575,6 +3614,8 @@ const handleApi = async (
         message: messageInput,
         remote: remoteInput,
         branch: branchInput,
+        url: urlInput,
+        targetDirectoryName: nameInput,
       });
 
       if (result.exitCode !== 0) {

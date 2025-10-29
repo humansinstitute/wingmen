@@ -290,6 +290,45 @@
         <label for="app-label">Name</label>
         <input id="app-label" type="text" autocomplete="off" placeholder="Docs Service" />
 
+        <fieldset class="wm-fieldset">
+          <legend>Source</legend>
+          <label class="wm-radio" for="app-setup-existing">
+            <input id="app-setup-existing" type="radio" name="app-setup-mode" value="existing" checked />
+            <span>Use existing directory</span>
+          </label>
+          <label class="wm-radio" for="app-setup-clone">
+            <input id="app-setup-clone" type="radio" name="app-setup-mode" value="clone" />
+            <span>Clone Git repository</span>
+          </label>
+        </fieldset>
+
+        <div id="app-clone-fields" class="wm-clone-fields" hidden>
+          <label for="app-clone-url">Repository URL</label>
+          <input
+            id="app-clone-url"
+            type="url"
+            autocomplete="off"
+            placeholder="https://github.com/wingman/example.git"
+          />
+
+          <label for="app-clone-name">Folder Name</label>
+          <input id="app-clone-name" type="text" autocomplete="off" placeholder="example-app" />
+
+          <label for="app-clone-directory">Parent Directory</label>
+          <div class="working-directory-field">
+            <input
+              id="app-clone-directory"
+              type="text"
+              autocomplete="off"
+              placeholder="~/code"
+            />
+            <div class="working-directory-actions">
+              <button type="button" class="wm-button secondary" id="app-clone-browse">Browse…</button>
+            </div>
+          </div>
+          <p class="wm-field-note">The app root will be set to <code>parent/folder</code> after cloning.</p>
+        </div>
+
         <label for="app-root">Root Directory</label>
         <div class="working-directory-field">
           <input id="app-root" type="text" autocomplete="off" placeholder="/Users/me/projects/app" />
