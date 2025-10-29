@@ -6771,6 +6771,9 @@ const ensureAppGitInfo = (app) => {
   if (state.apps.git.has(app.id) || isAppGitLoading(app.id)) {
     return;
   }
+  if (state.apps.gitErrors.has(app.id)) {
+    return;
+  }
   void refreshAppGitInfo(app.id, { root: app.root });
 };
 
