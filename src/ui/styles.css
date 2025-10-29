@@ -567,6 +567,13 @@ body[data-menu-open="true"] .wm-menu-panel {
   display: grid;
   gap: 1.25rem;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  justify-content: center;
+}
+
+@media (min-width: 1200px) {
+  .wm-apps-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 .wm-app-card {
@@ -730,6 +737,7 @@ body[data-menu-open="true"] .wm-menu-panel {
   align-items: center;
   flex-wrap: wrap;
   gap: 0.4rem;
+  color: var(--accent-primary);
 }
 
 .wm-app-git__controls .wm-select {
@@ -737,6 +745,11 @@ body[data-menu-open="true"] .wm-menu-panel {
   width: auto;
   max-width: 12rem;
   white-space: nowrap;
+}
+
+.wm-app-git__controls .wm-button-icon .wm-icon {
+  width: 1.45rem;
+  height: 1.45rem;
 }
 
 .wm-app-status-error {

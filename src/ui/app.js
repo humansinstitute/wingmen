@@ -1072,6 +1072,11 @@ const createIconSvg = (definition) => {
   svg.setAttribute("aria-hidden", "true");
   svg.setAttribute("focusable", "false");
   svg.classList.add("wm-icon");
+  svg.setAttribute("fill", "none");
+  svg.setAttribute("stroke", "currentColor");
+  svg.setAttribute("stroke-width", "1.9");
+  svg.setAttribute("stroke-linecap", "round");
+  svg.setAttribute("stroke-linejoin", "round");
   definition.forEach(([tag, attrs]) => {
     svg.append(createSvgShape(tag, attrs));
   });
