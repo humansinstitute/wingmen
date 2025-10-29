@@ -2652,7 +2652,13 @@ const updateSessionStatusIndicator = (sessionId) => {
   const title =
     info.state === "unknown" ? "Agent status not available" : `Agent status: ${info.label}`;
   indicator.dataset.state = info.state;
-  indicator.textContent = info.state === "working" || info.state === "stable" ? "" : info.label;
+  if (info.state === "working") {
+    indicator.textContent = "•";
+  } else if (info.state === "stable") {
+    indicator.textContent = "—";
+  } else {
+    indicator.textContent = info.label;
+  }
   indicator.title = title;
   indicator.setAttribute("aria-label", title);
 };
