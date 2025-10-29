@@ -1539,6 +1539,84 @@ body[data-menu-open="true"] .wm-menu-panel {
   flex-shrink: 0;
 }
 
+.wm-session-status-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.35rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  gap: 0.4rem;
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+  border: 1px solid rgba(120, 113, 108, 0.4);
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.wm-session-status-indicator::before {
+  content: "";
+  width: 0.45rem;
+  height: 0.45rem;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0 currentColor;
+}
+
+.wm-session-status-indicator[data-state="working"] {
+  background: rgba(16, 185, 129, 0.18);
+  color: var(--text-primary);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.wm-session-status-indicator[data-state="working"]::before {
+  animation: wmSessionStatusPulse 1.6s ease-in-out infinite;
+}
+
+.wm-session-status-indicator[data-state="stable"] {
+  background: rgba(5, 150, 105, 0.14);
+  color: var(--text-primary);
+  border-color: rgba(5, 150, 105, 0.35);
+}
+
+.wm-session-status-indicator[data-state="starting"] {
+  background: rgba(59, 130, 246, 0.18);
+  color: var(--text-primary);
+  border-color: rgba(59, 130, 246, 0.35);
+}
+
+.wm-session-status-indicator[data-state="error"] {
+  background: rgba(248, 113, 113, 0.2);
+  color: var(--text-primary);
+  border-color: rgba(248, 113, 113, 0.4);
+}
+
+.wm-session-status-indicator[data-state="stopped"] {
+  background: rgba(120, 113, 108, 0.25);
+  color: var(--text-tertiary);
+  border-color: rgba(120, 113, 108, 0.45);
+}
+
+.wm-session-status-indicator[data-state="unknown"] {
+  background: var(--bg-tertiary);
+  color: var(--text-tertiary);
+  border-color: rgba(120, 113, 108, 0.4);
+}
+
+@keyframes wmSessionStatusPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0.5);
+  }
+  70% {
+    box-shadow: 0 0 0 0.45rem rgba(16, 185, 129, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(16, 185, 129, 0);
+  }
+}
+
 .wm-command-wrapper {
   position: relative;
   display: flex;

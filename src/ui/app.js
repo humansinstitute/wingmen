@@ -37,6 +37,7 @@ const state = {
   conversations: new Map(),
   messageDrafts: new Map(),
   logPanelOpen: new Map(),
+  sessionStatusIndicators: new Map(),
   activeSessionId: null,
   lastWorkingDirectory: null,
   lastActiveSessionId: null,
@@ -2599,6 +2600,71 @@ const ACTIVE_SESSION_STATUSES = new Set(["starting", "running"]);
 const isSessionActive = (session) => ACTIVE_SESSION_STATUSES.has(session?.status);
 const getActiveSessions = () => state.sessions.filter((session) => isSessionActive(session));
 
+const deriveSessionStatusInfo = (session) => {
+  const agentStatusRaw =
+    session && typeof session.agentStatus === "string" ? session.agentStatus.toLowerCase() : "";
+  const fallbackStatus =
+    session && typeof session.status === "string" ? session.status.toLowerCase() : "";
+  const status = agentStatusRaw || fallbackStatus;
+
+  switch (status) {
+    case "working":
+    case "running":
+    case "busy":
+      return { label: "Working…", state: "working" };
+    case "stable":
+    case "idle":
+    case "ready":
+      return { label: "Stable", state: "stable" };
+    case "starting":
+      return { label: "Starting", state: "starting" };
+    case "error":
+    case "failed":
+    case "failure":
+      return { label: "Error", state: "error" };
+    case "stopped":
+    case "offline":
+    case "complete":
+    case "completed":
+      return { label: "Stopped", state: "stopped" };
+    case "unknown":
+    case "unreachable":
+    case "timeout":
+    case "":
+      return { label: "—", state: "unknown" };
+    default: {
+      const capitalised = status.charAt(0).toUpperCase() + status.slice(1);
+      return { label: capitalised, state: "unknown" };
+    }
+  }
+};
+
+const updateSessionStatusIndicator = (sessionId) => {
+  const indicator = state.sessionStatusIndicators.get(sessionId);
+  if (!indicator) return;
+
+  if (!document.contains(indicator)) {
+    state.sessionStatusIndicators.delete(sessionId);
+    return;
+  }
+
+  const session = getSessionById(sessionId);
+  const info = deriveSessionStatusInfo(session);
+  const title =
+    info.state === "unknown" ? "Agent status not available" : `Agent status: ${info.label}`;
+  indicator.dataset.state = info.state;
+  indicator.textContent = info.label;
+  indicator.title = title;
+  indicator.setAttribute("aria-label", title);
+};
+
+const syncSessionStatusIndicators = () => {
+  const sessionIds = Array.from(state.sessionStatusIndicators.keys());
+  sessionIds.forEach((sessionId) => {
+    updateSessionStatusIndicator(sessionId);
+  });
+};
+
 const LIVE_ROUTE_PREFIX = "/live";
 const FILES_ROUTE = "/files";
 const SETTINGS_ROUTE = "/settings";
@@ -3976,6 +4042,9 @@ const fetchSessions = async () => {
   for (const key of Array.from(state.lastLogLength.keys())) {
     if (!sessionIds.has(key)) state.lastLogLength.delete(key);
   }
+  for (const key of Array.from(state.sessionStatusIndicators.keys())) {
+    if (!sessionIds.has(key)) state.sessionStatusIndicators.delete(key);
+  }
   const routeSessionId = getSessionIdFromPath(window.location.pathname);
   const allowHistoryUpdate = currentRoute === "live" && !routeSessionId;
   const redirectHome = applyRouteSessionFromPath({ allowHistoryUpdate });
@@ -3997,6 +4066,7 @@ const fetchSessions = async () => {
   }
 
   syncDesktopSessionIndicator();
+  syncSessionStatusIndicators();
 
   if (!redirectHome && currentRoute === "live" && state.activeSessionId) {
     await Promise.all([
@@ -8240,11 +8310,21 @@ const renderComposer = (sessionId) => {
 
   const buttonGroup = document.createElement("div");
   buttonGroup.className = "wm-button-group";
+  const statusIndicator = document.createElement("div");
+  statusIndicator.className = "wm-session-status-indicator";
+  statusIndicator.setAttribute("role", "status");
+  statusIndicator.setAttribute("aria-live", "polite");
+  statusIndicator.dataset.state = "unknown";
+  statusIndicator.textContent = "—";
+
   const commandWrapper = document.createElement("div");
   commandWrapper.className = "wm-command-wrapper";
   commandWrapper.append(commandButton, commandMenu);
 
-  buttonGroup.append(commandWrapper, submit);
+  buttonGroup.append(statusIndicator, commandWrapper, submit);
+
+  state.sessionStatusIndicators.set(sessionId, statusIndicator);
+  updateSessionStatusIndicator(sessionId);
 
   composer.append(fileInput, attachmentInput, textarea, buttonGroup);
   composerShell.append(composer);

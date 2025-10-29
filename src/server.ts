@@ -55,6 +55,98 @@ const allowedDirectoryBoundaries = config.allowedDirectories.map((entry) =>
   entry.endsWith(sep) ? entry : `${entry}${sep}`,
 );
 
+interface SessionStatusSummary extends SessionSnapshot {
+  agentStatus?: string | null;
+}
+
+const fetchWithTimeout = async (
+  url: URL,
+  init: RequestInit | undefined = undefined,
+  timeoutMs = 2000,
+): Promise<Response> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const requestInit: RequestInit = init ? { ...init } : {};
+    requestInit.signal = controller.signal;
+    return await fetch(url, requestInit);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const extractAgentStatusValue = (payload: unknown): string | null => {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const data = payload as Record<string, unknown>;
+  const candidates: unknown[] = [
+    data.status,
+    data.state,
+    data.agent_status,
+    data.agentStatus,
+    data.mode,
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string") {
+      const trimmed = candidate.trim();
+      if (trimmed.length > 0) {
+        return trimmed.toLowerCase();
+      }
+    }
+  }
+
+  const nestedSources = [data.details, data.data, data.meta];
+  for (const source of nestedSources) {
+    if (source && typeof source === "object") {
+      const nested = extractAgentStatusValue(source);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
+};
+
+const enrichSessionsWithAgentStatus = async (
+  sessions: SessionSnapshot[],
+  host: string,
+): Promise<SessionStatusSummary[]> => {
+  return Promise.all(
+    sessions.map(async (session) => {
+      if (session.status !== "running") {
+        return { ...session, agentStatus: session.status };
+      }
+
+      try {
+        const statusUrl = buildAgentUrl(host, session.port, "/status");
+        const response = await fetchWithTimeout(statusUrl, undefined, 2000);
+        if (!response.ok) {
+          return { ...session, agentStatus: session.status };
+        }
+        const payload = await response.json().catch(() => null);
+        const agentStatus = extractAgentStatusValue(payload);
+        return {
+          ...session,
+          agentStatus: agentStatus ?? session.status,
+        };
+      } catch (error) {
+        if (error instanceof Error && (error.name === "AbortError" || error.name === "CanceledError")) {
+          return { ...session, agentStatus: session.status };
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `[manager] failed to fetch agent status for session ${session.id} on port ${session.port}:`,
+          message,
+        );
+        return { ...session, agentStatus: session.status };
+      }
+    }),
+  );
+};
+
 const ensureWithinAllowedDirectories = (candidate: string) => {
   if (config.allowedDirectories.length === 0) {
     return;
@@ -3966,6 +4058,7 @@ const handleApi = async (
       return sessionNormalized === filterValue;
     });
 
+    const sessions = await enrichSessionsWithAgentStatus(filteredSessions, agentHost);
     const identities = buildIdentitySummaries(allSessions);
     const npubFilters = identities.map((identity) => ({
       value: identity.normalizedNpub ?? "__anonymous__",
@@ -3976,7 +4069,7 @@ const handleApi = async (
     }));
 
     return Response.json({
-      sessions: filteredSessions,
+      sessions,
       identities,
       filters: {
         npubs: npubFilters,
