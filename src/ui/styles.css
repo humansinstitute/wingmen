@@ -1566,6 +1566,7 @@ body[data-menu-open="true"] .wm-menu-panel {
 }
 
 .wm-session-status-indicator[data-variant="symbol"]::before {
+  content: none;
   display: none;
 }
 
