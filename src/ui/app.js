@@ -2611,11 +2611,11 @@ const deriveSessionStatusInfo = (session) => {
     case "working":
     case "running":
     case "busy":
-      return { label: "Working…", state: "working" };
+      return { label: "Working…", state: "working", display: "•" };
     case "stable":
     case "idle":
     case "ready":
-      return { label: "Stable", state: "stable" };
+      return { label: "Stable", state: "stable", display: "—" };
     case "starting":
       return { label: "Starting", state: "starting" };
     case "error":
@@ -2631,7 +2631,7 @@ const deriveSessionStatusInfo = (session) => {
     case "unreachable":
     case "timeout":
     case "":
-      return { label: "—", state: "unknown" };
+      return { label: "Unknown", state: "unknown", display: "—" };
     default: {
       const capitalised = status.charAt(0).toUpperCase() + status.slice(1);
       return { label: capitalised, state: "unknown" };
@@ -2653,7 +2653,13 @@ const updateSessionStatusIndicator = (sessionId) => {
   const title =
     info.state === "unknown" ? "Agent status not available" : `Agent status: ${info.label}`;
   indicator.dataset.state = info.state;
-  indicator.textContent = info.label;
+  if (info.display) {
+    indicator.dataset.variant = "symbol";
+    indicator.textContent = info.display;
+  } else {
+    delete indicator.dataset.variant;
+    indicator.textContent = info.label;
+  }
   indicator.title = title;
   indicator.setAttribute("aria-label", title);
 };

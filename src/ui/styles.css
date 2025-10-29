@@ -1565,6 +1565,10 @@ body[data-menu-open="true"] .wm-menu-panel {
   box-shadow: 0 0 0 0 currentColor;
 }
 
+.wm-session-status-indicator[data-variant="symbol"]::before {
+  display: none;
+}
+
 .wm-session-status-indicator[data-state="working"] {
   background: rgba(16, 185, 129, 0.18);
   color: var(--text-primary);
