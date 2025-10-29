@@ -6967,7 +6967,7 @@ const renderAppGitSection = (app) => {
     return container;
   }
 
-  if (gitError) {
+  if (gitError && !gitInfo) {
     const error = document.createElement("p");
     error.className = "wm-app-git__error";
     error.textContent = gitError;
@@ -6982,7 +6982,6 @@ const renderAppGitSection = (app) => {
       void refreshAppGitInfo(app.id, { root: app.root, force: true });
     });
     body.append(retry);
-    return container;
   }
 
   const summary = document.createElement("div");
@@ -7010,10 +7009,30 @@ const renderAppGitSection = (app) => {
       summary.append(refreshLine);
     }
   } else {
-    const status = document.createElement("p");
-    status.className = "wm-app-git__status";
-    status.textContent = "Git repository not detected. Use git init to create one.";
-    summary.append(status);
+    if (!gitError) {
+      const status = document.createElement("p");
+      status.className = "wm-app-git__status";
+      status.textContent = "Git repository not detected. Use git init to create one.";
+      summary.append(status);
+    }
+    if (app.root) {
+      const rootLine = document.createElement("p");
+      rootLine.textContent = `Configured root: ${app.root}`;
+      rootLine.title = app.root;
+      summary.append(rootLine);
+    }
+    if (loading) {
+      const refreshLine = document.createElement("p");
+      refreshLine.className = "wm-app-git__status";
+      refreshLine.textContent = "Refreshing…";
+      summary.append(refreshLine);
+    }
+  }
+  if (summary.childElementCount === 0 && gitError) {
+    const message = document.createElement("p");
+    message.className = "wm-app-git__status";
+    message.textContent = gitError;
+    summary.append(message);
   }
   body.append(summary);
 
