@@ -38,6 +38,7 @@ const state = {
   messageDrafts: new Map(),
   logPanelOpen: new Map(),
   sessionStatusIndicators: new Map(),
+  sessionStatusOverrides: new Map(),
   activeSessionId: null,
   lastWorkingDirectory: null,
   lastActiveSessionId: null,
@@ -2639,6 +2640,28 @@ const deriveSessionStatusInfo = (session) => {
   }
 };
 
+const deriveSessionStatusInfoForId = (sessionId) => {
+  const override = state.sessionStatusOverrides.get(sessionId);
+  if (override === "working") {
+    return { label: "Working…", state: "working" };
+  }
+  if (override === "stable") {
+    return { label: "Stable", state: "stable" };
+  }
+  const session = getSessionById(sessionId);
+  return deriveSessionStatusInfo(session);
+};
+
+const applySessionStatusOverride = (sessionId, override) => {
+  if (!sessionId) return;
+  if (override) {
+    state.sessionStatusOverrides.set(sessionId, override);
+  } else {
+    state.sessionStatusOverrides.delete(sessionId);
+  }
+  updateSessionStatusIndicator(sessionId);
+};
+
 const updateSessionStatusIndicator = (sessionId) => {
   const indicator = state.sessionStatusIndicators.get(sessionId);
   if (!indicator) return;
@@ -2648,7 +2671,7 @@ const updateSessionStatusIndicator = (sessionId) => {
     return;
   }
 
-  const info = deriveSessionStatusInfo(getSessionById(sessionId));
+  const info = deriveSessionStatusInfoForId(sessionId);
   const title =
     info.state === "unknown" ? "Agent status not available" : `Agent status: ${info.label}`;
   indicator.dataset.state = info.state;
@@ -4050,6 +4073,18 @@ const fetchSessions = async () => {
   for (const key of Array.from(state.sessionStatusIndicators.keys())) {
     if (!sessionIds.has(key)) state.sessionStatusIndicators.delete(key);
   }
+  for (const key of Array.from(state.sessionStatusOverrides.keys())) {
+    if (!sessionIds.has(key)) state.sessionStatusOverrides.delete(key);
+  }
+
+  for (const session of state.sessions) {
+    if (state.sessionStatusOverrides.get(session.id) === "working") {
+      const info = deriveSessionStatusInfo(session);
+      if (info.state !== "working") {
+        state.sessionStatusOverrides.delete(session.id);
+      }
+    }
+  }
   const routeSessionId = getSessionIdFromPath(window.location.pathname);
   const allowHistoryUpdate = currentRoute === "live" && !routeSessionId;
   const redirectHome = applyRouteSessionFromPath({ allowHistoryUpdate });
@@ -4600,6 +4635,7 @@ const sendMessage = async (sessionId, content) => {
     return;
   }
 
+  applySessionStatusOverride(sessionId, "working");
   try {
     const response = await fetch(`/api/sessions/${sessionId}/messages`, {
       method: "POST",
@@ -4635,6 +4671,8 @@ const sendMessage = async (sessionId, content) => {
   } catch (error) {
     console.error("Failed to send agent message", error);
     window.alert("Failed to send message to agent. Check console for details.");
+  } finally {
+    applySessionStatusOverride(sessionId, null);
   }
 };
 
