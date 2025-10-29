@@ -23,6 +23,7 @@ export interface SessionRecordInput {
   agent: string;
   startedAt: string;
   name?: string;
+  npub?: string;
   port?: number;
   pid?: number;
   tmuxSession?: string;
@@ -36,6 +37,7 @@ export interface StoredSessionRecord {
   agent: string;
   startedAt: string;
   name: string | null;
+  npub: string | null;
   port: number | null;
   pid: number | null;
   tmuxSession: string | null;
@@ -76,6 +78,7 @@ export class MessageStore {
       session.agent,
       session.startedAt,
       session.name ?? null,
+      session.npub ?? null,
       typeof session.port === "number" ? session.port : null,
       typeof session.pid === "number" ? session.pid : null,
       session.tmuxSession ?? null,
@@ -161,16 +164,18 @@ export class MessageStore {
     ensureColumn("tmux_window", "TEXT");
     ensureColumn("working_directory", "TEXT");
     ensureColumn("command", "TEXT");
+    ensureColumn("npub", "TEXT");
   }
 
   private prepareInsertSession() {
     return this.db.prepare(
-      `INSERT INTO sessions (id, agent, started_at, name, port, pid, tmux_session, tmux_window, working_directory, command)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+      `INSERT INTO sessions (id, agent, started_at, name, npub, port, pid, tmux_session, tmux_window, working_directory, command)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
        ON CONFLICT(id) DO UPDATE SET
          agent = excluded.agent,
          started_at = excluded.started_at,
          name = excluded.name,
+         npub = excluded.npub,
          port = excluded.port,
          pid = excluded.pid,
          tmux_session = excluded.tmux_session,
@@ -191,6 +196,7 @@ export class MessageStore {
          agent,
          started_at as startedAt,
          name,
+         npub,
          port,
          pid,
          tmux_session as tmuxSession,

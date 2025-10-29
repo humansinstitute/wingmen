@@ -1,4 +1,5 @@
 import type { AgentDefinition, AgentType, WingmanConfig } from "../config";
+import { getAuthenticatedNpub } from "../auth/request-context";
 
 const MAX_LOG_LINES = 500;
 
@@ -11,6 +12,7 @@ export interface SessionSnapshot {
   name: string;
   status: SessionStatus;
   startedAt: string;
+  npub?: string;
   pid?: number;
   command: string[];
   workingDirectory: string;
@@ -37,6 +39,7 @@ export interface RehydrateSessionInput {
   tmuxWindow?: string;
   pid?: number;
   logs?: string[];
+  npub?: string;
 }
 
 interface AgentSession {
@@ -55,6 +58,7 @@ interface AgentSession {
   tmuxSession?: string;
   tmuxWindow?: string;
   detachedPid?: number;
+  npub?: string;
 }
 
 export class ProcessManager {
@@ -118,6 +122,7 @@ export class ProcessManager {
       tmuxSession,
       tmuxWindow,
       detachedPid: undefined,
+      npub: getAuthenticatedNpub() ?? undefined,
     };
 
     this.sessions.set(id, session);
@@ -173,6 +178,7 @@ export class ProcessManager {
       tmuxSession: input.tmuxSession,
       tmuxWindow: input.tmuxWindow,
       detachedPid: typeof input.pid === "number" ? input.pid : undefined,
+      npub: input.npub ?? undefined,
     };
 
     this.sessions.set(session.id, session);
@@ -357,6 +363,7 @@ export class ProcessManager {
       name: session.name,
       status: session.status,
       startedAt: session.startedAt.toISOString(),
+      npub: session.npub,
       pid: session.process?.pid ?? session.detachedPid,
       command: session.command,
       workingDirectory: session.workingDirectory,

@@ -448,6 +448,7 @@ export class FileWatcherRunner {
       agent: session.agent,
       startedAt: session.startedAt,
       name: session.name,
+      npub: session.npub,
       port: session.port,
       pid: session.pid,
       tmuxSession: session.tmuxSession,
@@ -525,11 +526,13 @@ export class FileWatcherRunner {
     const absolute = isAbsolute(expanded) ? expanded : resolve(this.config.defaultWorkingDirectory, expanded);
 
     let resolvedPath = normalize(absolute);
+    this.assertWithinAllowedDirectories(resolvedPath);
     try {
       resolvedPath = normalize(await realpath(resolvedPath));
     } catch {
       // Use normalised path if realpath fails (likely missing directory)
     }
+    this.assertWithinAllowedDirectories(resolvedPath);
 
     let stats: Awaited<ReturnType<typeof stat>>;
     try {
@@ -553,6 +556,23 @@ export class FileWatcherRunner {
 
     await mkdir(target, { recursive: true });
     return target;
+  }
+
+  private assertWithinAllowedDirectories(candidate: string) {
+    const allowed = this.config.allowedDirectories;
+    if (!allowed.length) {
+      return;
+    }
+
+    const normalised = normalize(candidate);
+    for (const base of allowed) {
+      const boundary = base.endsWith(sep) ? base : `${base}${sep}`;
+      if (normalised === base || normalised.startsWith(boundary)) {
+        return;
+      }
+    }
+
+    throw new Error(`Directory outside permitted locations: ${normalised}`);
   }
 
   private async delay(ms: number) {

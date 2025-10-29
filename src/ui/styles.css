@@ -481,6 +481,37 @@ body[data-menu-open="true"] .wm-menu-panel {
   gap: 1.5rem;
 }
 
+.wm-home-identity-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.25rem;
+}
+
+.wm-home-identity-info {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+}
+
+.wm-home-identity-label {
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.wm-home-identity-status {
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.wm-home-identity-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .wm-apps {
   display: flex;
   flex-direction: column;
@@ -1141,6 +1172,21 @@ body[data-menu-open="true"] .wm-menu-panel {
   margin-bottom: 1rem;
 }
 
+.wm-session-filter {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-right: auto;
+}
+
+.wm-session-filter label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
 .wm-button {
   appearance: none;
   border: none;
@@ -1152,6 +1198,22 @@ body[data-menu-open="true"] .wm-menu-panel {
   color: #ffffff;
   transition: transform 200ms ease, box-shadow 200ms ease, background 200ms ease;
   box-shadow: var(--shadow-sm);
+}
+
+.wm-link-button {
+  border: none;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--accent-primary);
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.wm-link-button:hover,
+.wm-link-button:focus-visible {
+  color: var(--accent-secondary);
+  text-decoration: underline;
 }
 
 .wm-button.secondary {
@@ -1168,6 +1230,97 @@ body[data-menu-open="true"] .wm-menu-panel {
 
 .wm-button.secondary:hover {
   background: rgba(16, 185, 129, 0.25);
+}
+
+.wm-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  box-shadow: none;
+  transform: none;
+}
+
+.wm-button[data-state="loading"] {
+  position: relative;
+  background: rgba(16, 185, 129, 0.35);
+  color: var(--text-primary);
+}
+
+.wm-button.secondary[data-state="loading"] {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--accent-primary);
+}
+
+.wm-button[data-state="loading"]::after {
+  content: "";
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-left: 0.4rem;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: wm-spin 0.8s linear infinite;
+  vertical-align: middle;
+}
+
+.wm-button[data-state="success"] {
+  background: rgba(16, 185, 129, 0.85);
+  color: #ffffff;
+}
+
+.wm-button.secondary[data-state="success"] {
+  background: rgba(16, 185, 129, 0.18);
+  color: var(--accent-primary);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.wm-button[data-state="success"]::after {
+  content: "✓";
+  font-weight: 700;
+  margin-left: 0.35rem;
+}
+
+.wm-button[data-state="error"] {
+  background: rgba(248, 113, 113, 0.9);
+  color: #ffffff;
+}
+
+.wm-button.secondary[data-state="error"] {
+  background: rgba(248, 113, 113, 0.18);
+  color: rgba(239, 68, 68, 0.95);
+  border-color: rgba(248, 113, 113, 0.45);
+}
+
+.wm-button[data-state="error"]::after {
+  content: "!";
+  font-weight: 700;
+  margin-left: 0.35rem;
+}
+
+.wm-button[data-state]::after {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wm-button[data-state="error"]:hover,
+.wm-button[data-state="success"]:hover,
+.wm-button[data-state="loading"]:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.wm-button[data-state="loading"][disabled] {
+  opacity: 0.75;
+}
+
+@keyframes wm-spin {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
 }
 
 .wm-tabs {
@@ -2069,6 +2222,59 @@ dialog input[type="number"] {
 dialog textarea {
   min-height: 6rem;
   resize: vertical;
+}
+
+.wm-identity-dialog {
+  padding: 0;
+  max-width: none;
+  background: transparent;
+  color: inherit;
+}
+
+.wm-identity-dialog__content {
+  width: min(90vw, 640px);
+  margin: 0 auto;
+}
+
+.wm-identity-dialog__content > .wm-card {
+  margin: 0;
+}
+
+.wm-identity-dialog__actions {
+  width: min(90vw, 640px);
+  margin: 1rem auto 0;
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.wm-identity-dialog-card {
+  margin: 0;
+}
+
+.wm-password-dialog-error {
+  margin: -0.25rem 0 0;
+  color: #f87171;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.wm-password-dialog-reset {
+  margin-top: -0.25rem;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--text-tertiary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: underline;
+  align-self: flex-start;
+}
+
+.wm-password-dialog-reset:hover,
+.wm-password-dialog-reset:focus {
+  color: var(--accent-primary);
+  outline: none;
 }
 
 .wm-dialog-help {

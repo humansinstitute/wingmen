@@ -97,6 +97,48 @@
         </menu>
       </form>
     </dialog>
+    <dialog id="identity-password-dialog">
+      <form method="dialog" data-role="form">
+        <h2 data-role="title">Protect Your Key</h2>
+        <p class="wm-dialog-help" data-role="description">
+          Set a password to encrypt your Nostr private key. You’ll need it to unlock cached sessions.
+        </p>
+        <label for="identity-password-input">Password</label>
+        <input
+          id="identity-password-input"
+          name="password"
+          type="password"
+          autocomplete="new-password"
+          minlength="8"
+          required
+        />
+        <div data-role="confirm-field">
+          <label for="identity-password-confirm">Confirm Password</label>
+          <input
+            id="identity-password-confirm"
+            name="passwordConfirm"
+            type="password"
+            autocomplete="new-password"
+            minlength="8"
+            required
+          />
+        </div>
+        <p class="wm-password-dialog-error" data-role="error" hidden></p>
+        <button type="button" class="wm-password-dialog-reset" data-action="identity-password-clear" hidden>
+          Forget saved key and logout
+        </button>
+        <menu>
+          <button value="cancel">Cancel</button>
+          <button value="confirm">Continue</button>
+        </menu>
+      </form>
+    </dialog>
+    <dialog id="identity-login-dialog" class="wm-identity-dialog">
+      <div class="wm-identity-dialog__content"></div>
+      <div class="wm-identity-dialog__actions">
+        <button type="button" class="wm-button secondary" data-action="identity-dialog-close">Close</button>
+      </div>
+    </dialog>
     <dialog id="directory-dialog">
       <form method="dialog">
         <h2 id="directory-title">Select Working Directory</h2>

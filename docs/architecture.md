@@ -16,7 +16,7 @@
 
 1. `src/index.ts` boots the Bun server defined in `src/server.ts`.
 2. API clients call `/api/sessions` to create, list, or stop agent sessions.
-3. The `ProcessManager` allocates an available port (`AGENT_PORTS` … `AGENT_PORTS + AGENT_MAX`) and spawns `out/agentapi server` with the requested agent CLI inside the `DIRECTORY_DEF` working directory.
+3. The `ProcessManager` allocates an available port (`AGENT_PORTS` … `AGENT_PORTS + AGENT_MAX`) and spawns `out/agentapi server` with the requested agent CLI inside the `DIRECTORY_DEF` working directory. The dashboard’s file browsers and pickers only expose directories declared via `FOLDERACCESS`.
 4. The AgentAPI subprocess exposes its own HTTP API (messages, events, status) on that port while streaming stdout/stderr back to Wingman for diagnostics.
 5. The Wingman Home view lists sessions, while the Live view renders tabs, displays each agent conversation, lets users send prompts, and continues to poll `/api/sessions/:id/logs` for diagnostics.
 
@@ -27,6 +27,7 @@
 - **Process Scaling**: Adjust `AGENT_MAX`/`AGENT_PORTS` in the environment; augment `ProcessManager` to distribute across nodes if required.
 - **Observability**: Enhance log streaming (e.g., WebSockets or SSE) and persist metrics for running sessions.
 - **Frontend**: Evolve `src/ui` or integrate the `Examples/Example Web Interface/` assets for richer controls, including runtime directory selection.
+  - The bunker (NIP-46) identity flows rely on a pre-bundled browser module generated from the applesauce libraries (`bun run build:bunker-client` emits `public/vendor/bunker-client.js`). The dashboard imports only that bundle so that bunker secrets never leave the browser while we keep network requests lean.
 
 ## Image Attachments
 

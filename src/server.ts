@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { mkdirSync, type Dirent } from "node:fs";
 import { chmod, cp, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, isAbsolute, join, normalize, relative, resolve as resolvePath, sep } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire } from "node:module";
 
 import type { AgentType } from "./config";
 import { loadConfig } from "./config";
@@ -36,12 +38,39 @@ import {
   sendAgentMessage,
   waitForAgentReady as waitForAgentReadyCore,
 } from "./agents/agent-client";
+import { mintSessionCookie, SessionCookieError, SESSION_COOKIE_NAME } from "./auth/session-cookie";
+import {
+  resolveRequestAuthContext,
+  runWithRequestContext,
+  type RequestAuthContext,
+} from "./auth/request-context";
+import { deriveNpubSegment, normaliseNpub } from "./identity/npub-utils";
 
 const config = loadConfig();
 process.env.WINGMAN_PID = process.pid.toString();
 console.log(`[config] tmux session base: ${config.tmuxBase}`);
 const TMUX_SESSION_NAME = config.tmuxBase;
 const SUPPORTED_AGENT_TYPES: AgentType[] = ["codex", "claude", "goose", "opencode", "gemini"];
+const allowedDirectoryBoundaries = config.allowedDirectories.map((entry) =>
+  entry.endsWith(sep) ? entry : `${entry}${sep}`,
+);
+
+const ensureWithinAllowedDirectories = (candidate: string) => {
+  if (config.allowedDirectories.length === 0) {
+    return;
+  }
+
+  const normalised = normalize(candidate);
+  for (let index = 0; index < config.allowedDirectories.length; index += 1) {
+    const base = config.allowedDirectories[index];
+    const boundary = allowedDirectoryBoundaries[index];
+    if (normalised === base || normalised.startsWith(boundary)) {
+      return;
+    }
+  }
+
+  throw new Error(`Directory outside permitted locations: ${normalised}`);
+};
 
 const projectRootPath = (() => {
   let root = normalize(fileURLToPath(new URL("..", import.meta.url)));
@@ -280,6 +309,7 @@ const rehydrateWarmSessions = async (
       tmuxWindow: record.tmuxWindow ?? undefined,
       pid: storedPid ?? undefined,
       logs: undefined,
+      npub: record.npub ?? undefined,
     });
 
     if (!snapshot) {
@@ -287,11 +317,13 @@ const rehydrateWarmSessions = async (
       continue;
     }
 
+    ensureUserWorkspace(snapshot.npub ?? null);
     messageStore.recordSession({
       id: snapshot.id,
       agent: snapshot.agent,
       startedAt: snapshot.startedAt,
       name: snapshot.name,
+      npub: snapshot.npub,
       port: snapshot.port,
       pid: snapshot.pid,
       tmuxSession: snapshot.tmuxSession,
@@ -723,8 +755,9 @@ const ensureWingmanAgentsSessionClean = async () => {
 const srcRoot = fileURLToPath(new URL(".", import.meta.url));
 const projectRoot = fileURLToPath(new URL("..", import.meta.url));
 const tmpRoot = normalize(join(srcRoot, "../tmp"));
-const imageRoot = join(tmpRoot, "images");
-const attachmentRoot = join(tmpRoot, "attachments");
+const uploadsRoot = join(tmpRoot, "uploads");
+const imageRoot = join(uploadsRoot, "images");
+const attachmentRoot = join(uploadsRoot, "attachments");
 const determineHomeDirectory = (): string => {
   const fromEnv = Bun.env.HOME?.trim();
   if (fromEnv) {
@@ -741,15 +774,47 @@ const rawHomeDirectory = determineHomeDirectory();
 const homeDirectory = normalize(await realpath(rawHomeDirectory).catch(() => rawHomeDirectory));
 const documentsDirectory = join(homeDirectory, "Documents");
 const userDataRoot = join(documentsDirectory, "Wingman");
+const userIdentityRoot = join(userDataRoot, "users");
 const docsRoot = homeDirectory;
 const docsRootBoundary = docsRoot.endsWith(sep) ? docsRoot : `${docsRoot}${sep}`;
-const nodeModulesRoot = normalize(join(projectRoot, "node_modules"));
-const aceBuildsRoot = normalize(join(nodeModulesRoot, "ace-builds"));
+const require = createRequire(import.meta.url);
+const resolvePackageRoot = (specifier: string) => {
+  try {
+    const packageJsonPath = require.resolve(`${specifier}/package.json`);
+    return normalize(join(packageJsonPath, ".."));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn(`[static] failed to resolve package root for ${specifier}: ${message}`);
+    return undefined;
+  }
+};
+const resolvedAceBuildsRoot = resolvePackageRoot("ace-builds");
+const aceBuildsRoot = resolvedAceBuildsRoot ?? normalize(join(projectRoot, "node_modules", "ace-builds"));
 const aceBuildsRootBoundary = aceBuildsRoot.endsWith(sep) ? aceBuildsRoot : `${aceBuildsRoot}${sep}`;
+const vendorPackages: Record<string, { root: string; boundary: string; entry: string }> = {};
+const registerVendorPackage = (name: string, relative: string, entry = "index.js") => {
+  const root = resolvePackageRoot(name);
+  if (!root) return;
+  const resolved = normalize(join(root, relative));
+  vendorPackages[name] = {
+    root: resolved,
+    boundary: resolved.endsWith(sep) ? resolved : `${resolved}${sep}`,
+    entry,
+  };
+};
+registerVendorPackage("@noble/hashes", "esm");
+registerVendorPackage("@noble/ciphers", "esm");
+registerVendorPackage("@scure/base", join("lib", "esm"));
+registerVendorPackage("@noble/curves", "esm");
+registerVendorPackage("nostr-tools", join("lib", "esm"));
 const publicRoot = normalize(join(projectRoot, "public"));
 const publicRootBoundary = publicRoot.endsWith(sep) ? publicRoot : `${publicRoot}${sep}`;
 await mkdir(documentsDirectory, { recursive: true }).catch(() => undefined);
 await mkdir(userDataRoot, { recursive: true }).catch(() => undefined);
+await mkdir(userIdentityRoot, { recursive: true }).catch(() => undefined);
+await mkdir(uploadsRoot, { recursive: true }).catch(() => undefined);
+await mkdir(imageRoot, { recursive: true }).catch(() => undefined);
+await mkdir(attachmentRoot, { recursive: true }).catch(() => undefined);
 const warmRestartRoot = join(homeDirectory, ".wingmen");
 await mkdir(warmRestartRoot, { recursive: true }).catch(() => undefined);
 const restartMarkerPath = join(warmRestartRoot, "restart.json");
@@ -777,18 +842,54 @@ const attachmentTtlMs = 24 * 60 * 60 * 1000;
 const imageCleanupIntervalMs = 24 * 60 * 60 * 1000;
 const attachmentCleanupIntervalMs = 24 * 60 * 60 * 1000;
 
-const ensureImageDirectory = async (agent: AgentType) => {
-  await mkdir(imageRoot, { recursive: true });
-  const directory = join(imageRoot, agent);
+const shouldUseSecureCookies = () => {
+  const flag = (Bun.env.IDENTITY_COOKIE_SECURE ?? Bun.env.COOKIE_SECURE ?? "").trim().toLowerCase();
+  if (flag === "false" || flag === "0") return false;
+  if (flag === "true" || flag === "1") return true;
+  return Bun.env.NODE_ENV === "production";
+};
+
+const ensureUserWorkspace = (npub: string | null) => {
+  const segment = deriveNpubSegment(npub);
+  try {
+    mkdirSync(join(userIdentityRoot, segment), { recursive: true });
+  } catch (error) {
+    console.warn(`[uploads] failed to ensure user base for ${segment}: ${(error as Error).message}`);
+  }
+  try {
+    mkdirSync(join(userIdentityRoot, segment, "logs"), { recursive: true });
+  } catch (error) {
+    console.warn(`[uploads] failed to ensure user log directory for ${segment}: ${(error as Error).message}`);
+  }
+  try {
+    mkdirSync(join(attachmentRoot, segment), { recursive: true });
+  } catch (error) {
+    console.warn(`[uploads] failed to ensure attachment root for ${segment}: ${(error as Error).message}`);
+  }
+  try {
+    mkdirSync(join(imageRoot, segment), { recursive: true });
+  } catch (error) {
+    console.warn(`[uploads] failed to ensure image root for ${segment}: ${(error as Error).message}`);
+  }
+  return segment;
+};
+
+const ensureUserUploadDirectory = async (root: string, segment: string, agent: AgentType) => {
+  const userRoot = join(root, segment);
+  await mkdir(userRoot, { recursive: true });
+  const directory = join(userRoot, agent);
   await mkdir(directory, { recursive: true });
   return directory;
 };
 
-const ensureAttachmentDirectory = async (agent: AgentType) => {
-  await mkdir(attachmentRoot, { recursive: true });
-  const directory = join(attachmentRoot, agent);
-  await mkdir(directory, { recursive: true });
-  return directory;
+const ensureImageDirectory = async (agent: AgentType, npub: string | null) => {
+  const segment = ensureUserWorkspace(npub);
+  return await ensureUserUploadDirectory(imageRoot, segment, agent);
+};
+
+const ensureAttachmentDirectory = async (agent: AgentType, npub: string | null) => {
+  const segment = ensureUserWorkspace(npub);
+  return await ensureUserUploadDirectory(attachmentRoot, segment, agent);
 };
 
 const defaultSecurityReviewIntro =
@@ -917,17 +1018,133 @@ const buildAgentFilePlaceholder = (
   }
 };
 
-const resolveTempImage = (pathname: string) => {
-  if (!pathname.startsWith("/uploads/images/")) return undefined;
-  const relative = pathname.replace("/uploads/images/", "");
+type IdentitySummary = {
+  npub: string | null;
+  normalizedNpub: string | null;
+  segment: string;
+  sessionIds: string[];
+  activeSessionIds: string[];
+  lastSeenAt: string | null;
+  dataRoot: string;
+  logsRoot: string;
+  attachmentsRoot: string;
+  imagesRoot: string;
+};
+
+const buildIdentitySummaries = (activeSessions: SessionSnapshot[]): IdentitySummary[] => {
+  const activeSessionMap = new Map(activeSessions.map((session) => [session.id, session] as const));
+  type Accumulator = {
+    npub: string | null;
+    normalized: string | null;
+    segment: string;
+    dataRoot: string;
+    logsRoot: string;
+    attachmentsRoot: string;
+    imagesRoot: string;
+    sessionIds: Set<string>;
+    activeSessionIds: Set<string>;
+    lastSeenMs: number;
+  };
+
+  const summaryMap = new Map<string, Accumulator>();
+
+  const registerSession = (npubValue: string | null, sessionId: string, startedAt: string, isActive: boolean) => {
+    const normalized = normaliseNpub(npubValue);
+    const key = normalized ?? "__anonymous__";
+    let accumulator = summaryMap.get(key);
+    if (!accumulator) {
+      const segment = deriveNpubSegment(npubValue);
+      const dataRoot = normalize(join(userIdentityRoot, segment));
+      const logsRoot = normalize(join(dataRoot, "logs"));
+      const attachmentsRoot = normalize(join(attachmentRoot, segment));
+      const imagesRoot = normalize(join(imageRoot, segment));
+      accumulator = {
+        npub: npubValue,
+        normalized,
+        segment,
+        dataRoot,
+        logsRoot,
+        attachmentsRoot,
+        imagesRoot,
+        sessionIds: new Set(),
+        activeSessionIds: new Set(),
+        lastSeenMs: 0,
+      };
+      summaryMap.set(key, accumulator);
+    }
+
+    accumulator.sessionIds.add(sessionId);
+    if (isActive) {
+      accumulator.activeSessionIds.add(sessionId);
+    }
+
+    const parsed = Date.parse(startedAt);
+    const timestamp = Number.isFinite(parsed) ? parsed : Date.now();
+    if (timestamp > accumulator.lastSeenMs) {
+      accumulator.lastSeenMs = timestamp;
+    }
+  };
+
+  const storedSessions = messageStore.listSessions();
+  for (const record of storedSessions) {
+    const npubValue = record.npub ?? null;
+    registerSession(npubValue, record.id, record.startedAt, activeSessionMap.has(record.id));
+  }
+
+  for (const session of activeSessions) {
+    registerSession(session.npub ?? null, session.id, session.startedAt, true);
+  }
+
+  return Array.from(summaryMap.values())
+    .map((entry) => ({
+      npub: entry.npub,
+      normalizedNpub: entry.normalized,
+      segment: entry.segment,
+      sessionIds: Array.from(entry.sessionIds),
+      activeSessionIds: Array.from(entry.activeSessionIds),
+      lastSeenAt: entry.lastSeenMs > 0 ? new Date(entry.lastSeenMs).toISOString() : null,
+      dataRoot: entry.dataRoot,
+      logsRoot: entry.logsRoot,
+      attachmentsRoot: entry.attachmentsRoot,
+      imagesRoot: entry.imagesRoot,
+    }))
+    .sort((a, b) => {
+      const left = a.normalizedNpub ?? "";
+      const right = b.normalizedNpub ?? "";
+      return left.localeCompare(right);
+    });
+};
+
+const resolveScopedUpload = (pathname: string, authContext: RequestAuthContext, prefix: string, root: string) => {
+  if (!pathname.startsWith(prefix)) return undefined;
+  const relative = pathname.slice(prefix.length);
   if (!relative) return undefined;
-  const normalized = normalize(relative);
-  const fullPath = join(imageRoot, normalized);
-  if (!fullPath.startsWith(imageRoot)) {
+  const parts = relative.split("/").filter((segment) => segment.length > 0);
+  if (parts.length < 2) return undefined;
+
+  const [segment, ...rest] = parts;
+  const expectedSegment = deriveNpubSegment(authContext.npub ?? null);
+  if (segment !== expectedSegment) {
     return undefined;
   }
+
+  const userRoot = join(root, segment);
+  const normalized = normalize(join(...rest));
+  const fullPath = join(userRoot, normalized);
+  if (!fullPath.startsWith(userRoot)) {
+    return undefined;
+  }
+
   const file = Bun.file(fullPath);
   if (file.size === 0) return undefined;
+
+  return { file, fullPath };
+};
+
+const resolveTempImage = (pathname: string, authContext: RequestAuthContext) => {
+  const resolved = resolveScopedUpload(pathname, authContext, "/uploads/images/", imageRoot);
+  if (!resolved) return undefined;
+  const { file } = resolved;
   return new Response(file, {
     headers: {
       ...(file.type ? { "content-type": file.type } : {}),
@@ -936,17 +1153,10 @@ const resolveTempImage = (pathname: string) => {
   });
 };
 
-const resolveTempAttachment = (pathname: string) => {
-  if (!pathname.startsWith("/uploads/files/")) return undefined;
-  const relative = pathname.replace("/uploads/files/", "");
-  if (!relative) return undefined;
-  const normalized = normalize(relative);
-  const fullPath = join(attachmentRoot, normalized);
-  if (!fullPath.startsWith(attachmentRoot)) {
-    return undefined;
-  }
-  const file = Bun.file(fullPath);
-  if (file.size === 0) return undefined;
+const resolveTempAttachment = (pathname: string, authContext: RequestAuthContext) => {
+  const resolved = resolveScopedUpload(pathname, authContext, "/uploads/files/", attachmentRoot);
+  if (!resolved) return undefined;
+  const { file } = resolved;
   return new Response(file, {
     headers: {
       ...(file.type ? { "content-type": file.type } : {}),
@@ -956,7 +1166,7 @@ const resolveTempAttachment = (pathname: string) => {
 };
 
 const runImageCleanup = async () => {
-  let directories: Awaited<ReturnType<typeof readdir>>;
+  let directories: Dirent[];
   try {
     directories = await readdir(imageRoot, { withFileTypes: true });
   } catch (error) {
@@ -972,30 +1182,45 @@ const runImageCleanup = async () => {
   await Promise.all(
     directories
       .filter((entry) => entry.isDirectory())
-      .map(async (dir) => {
-        const dirPath = join(imageRoot, dir.name);
-        let files: Awaited<ReturnType<typeof readdir>>;
+      .map(async (userDir) => {
+        const userPath = join(imageRoot, userDir.name);
+        let agentEntries: Dirent[];
         try {
-          files = await readdir(dirPath, { withFileTypes: true });
+          agentEntries = await readdir(userPath, { withFileTypes: true });
         } catch (error) {
-          console.error(`[uploads] failed to list directory ${dir.name}`, error);
+          console.error(`[uploads] failed to list user image directory ${userDir.name}`, error);
           return;
         }
 
         await Promise.all(
-          files
-            .filter((entry) => entry.isFile())
-            .map(async (file) => {
-              const filePath = join(dirPath, file.name);
+          agentEntries
+            .filter((entry) => entry.isDirectory())
+            .map(async (agentDir) => {
+              const agentPath = join(userPath, agentDir.name);
+              let files: Dirent[];
               try {
-                const stats = await stat(filePath);
-                if (stats.mtimeMs < threshold) {
-                  await rm(filePath, { force: true });
-                  console.log(`[uploads] removed expired image ${filePath}`);
-                }
+                files = await readdir(agentPath, { withFileTypes: true });
               } catch (error) {
-                console.error(`[uploads] failed to cleanup ${filePath}`, error);
+                console.error(`[uploads] failed to list agent image directory ${agentDir.name}`, error);
+                return;
               }
+
+              await Promise.all(
+                files
+                  .filter((entry) => entry.isFile())
+                  .map(async (file) => {
+                    const filePath = join(agentPath, file.name);
+                    try {
+                      const stats = await stat(filePath);
+                      if (stats.mtimeMs < threshold) {
+                        await rm(filePath, { force: true });
+                        console.log(`[uploads] removed expired image ${filePath}`);
+                      }
+                    } catch (error) {
+                      console.error(`[uploads] failed to cleanup ${filePath}`, error);
+                    }
+                  }),
+              );
             }),
         );
       }),
@@ -1013,7 +1238,7 @@ const scheduleImageCleanup = () => {
 scheduleImageCleanup();
 
 const runAttachmentCleanup = async () => {
-  let directories: Awaited<ReturnType<typeof readdir>>;
+  let directories: Dirent[];
   try {
     directories = await readdir(attachmentRoot, { withFileTypes: true });
   } catch (error) {
@@ -1029,30 +1254,45 @@ const runAttachmentCleanup = async () => {
   await Promise.all(
     directories
       .filter((entry) => entry.isDirectory())
-      .map(async (dir) => {
-        const dirPath = join(attachmentRoot, dir.name);
-        let files: Awaited<ReturnType<typeof readdir>>;
+      .map(async (userDir) => {
+        const userPath = join(attachmentRoot, userDir.name);
+        let agentEntries: Dirent[];
         try {
-          files = await readdir(dirPath, { withFileTypes: true });
+          agentEntries = await readdir(userPath, { withFileTypes: true });
         } catch (error) {
-          console.error(`[uploads] failed to list attachment subdirectory ${dir.name}`, error);
+          console.error(`[uploads] failed to list user attachment directory ${userDir.name}`, error);
           return;
         }
 
         await Promise.all(
-          files
-            .filter((entry) => entry.isFile())
-            .map(async (file) => {
-              const filePath = join(dirPath, file.name);
+          agentEntries
+            .filter((entry) => entry.isDirectory())
+            .map(async (agentDir) => {
+              const agentPath = join(userPath, agentDir.name);
+              let files: Dirent[];
               try {
-                const stats = await stat(filePath);
-                if (stats.mtimeMs < threshold) {
-                  await rm(filePath, { force: true });
-                  console.log(`[uploads] removed expired attachment ${filePath}`);
-                }
+                files = await readdir(agentPath, { withFileTypes: true });
               } catch (error) {
-                console.error(`[uploads] failed to cleanup attachment ${filePath}`, error);
+                console.error(`[uploads] failed to list attachment subdirectory ${agentDir.name}`, error);
+                return;
               }
+
+              await Promise.all(
+                files
+                  .filter((entry) => entry.isFile())
+                  .map(async (file) => {
+                    const filePath = join(agentPath, file.name);
+                    try {
+                      const stats = await stat(filePath);
+                      if (stats.mtimeMs < threshold) {
+                        await rm(filePath, { force: true });
+                        console.log(`[uploads] removed expired attachment ${filePath}`);
+                      }
+                    } catch (error) {
+                      console.error(`[uploads] failed to cleanup attachment ${filePath}`, error);
+                    }
+                  }),
+              );
             }),
         );
       }),
@@ -1070,11 +1310,13 @@ scheduleAttachmentCleanup();
 
 manager.on((event) => {
   if (event.type === "session-started") {
+    ensureUserWorkspace(event.session.npub ?? null);
     messageStore.recordSession({
       id: event.session.id,
       agent: event.session.agent,
       startedAt: event.session.startedAt,
       name: event.session.name,
+      npub: event.session.npub,
       port: event.session.port,
       pid: event.session.pid,
       tmuxSession: event.session.tmuxSession,
@@ -1086,11 +1328,13 @@ manager.on((event) => {
     return;
   }
   if (event.type === "session-updated" || event.type === "session-stopped") {
+    ensureUserWorkspace(event.session.npub ?? null);
     messageStore.recordSession({
       id: event.session.id,
       agent: event.session.agent,
       startedAt: event.session.startedAt,
       name: event.session.name,
+      npub: event.session.npub,
       port: event.session.port,
       pid: event.session.pid,
       tmuxSession: event.session.tmuxSession,
@@ -1102,6 +1346,7 @@ manager.on((event) => {
 });
 
 const MAX_DIRECTORY_RESULTS = 50;
+const DIRECTORY_BROWSER_ROOT = "__root__";
 
 const expandHomeDirectory = (input: string): string => {
   if (!input.startsWith("~")) {
@@ -1116,7 +1361,39 @@ const toAbsoluteDirectory = (input: string): string => {
   const candidate = isAbsolute(expanded)
     ? expanded
     : resolvePath(config.defaultWorkingDirectory, expanded);
-  return normalize(candidate);
+  const normalised = normalize(candidate);
+  ensureWithinAllowedDirectories(normalised);
+  return normalised;
+};
+
+const formatHomeRelativePath = (absolute: string): string => {
+  try {
+    const home = homedir();
+    if (!home) {
+      return absolute;
+    }
+    const normalisedHome = normalize(home);
+    if (absolute === normalisedHome) {
+      return "~";
+    }
+    const prefix = normalisedHome.endsWith(sep) ? normalisedHome : `${normalisedHome}${sep}`;
+    if (absolute.startsWith(prefix)) {
+      const suffix = absolute.slice(prefix.length);
+      return suffix.length > 0 ? `~${sep}${suffix}` : "~";
+    }
+  } catch {
+    // Ignore homedir resolution errors and fall back to the basename below.
+  }
+  return absolute;
+};
+
+const formatRootDirectoryName = (absolute: string): string => {
+  const homeRelative = formatHomeRelativePath(absolute);
+  if (homeRelative !== absolute) {
+    return homeRelative;
+  }
+  const name = basename(absolute);
+  return name.length > 0 ? name : absolute;
 };
 
 const ensureDirectory = async (input: string | null | undefined): Promise<string> => {
@@ -1130,6 +1407,8 @@ const ensureDirectory = async (input: string | null | undefined): Promise<string
   } catch {
     // realpath fails when the directory does not exist; keep the normalized path.
     resolved = absolute;
+  } finally {
+    ensureWithinAllowedDirectories(resolved);
   }
 
   let stats: Awaited<ReturnType<typeof stat>>;
@@ -1144,6 +1423,68 @@ const ensureDirectory = async (input: string | null | undefined): Promise<string
   }
 
   return resolved;
+};
+
+const listRootDirectories = async (query?: string) => {
+  const term = query?.trim().toLowerCase() ?? "";
+  const seen = new Set<string>();
+  const entries: Array<{ name: string; path: string }> = [];
+
+  for (const absolute of config.allowedDirectories) {
+    if (seen.has(absolute)) {
+      continue;
+    }
+    seen.add(absolute);
+    let stats: Awaited<ReturnType<typeof stat>>;
+    try {
+      stats = await stat(absolute);
+    } catch {
+      continue;
+    }
+    if (!stats.isDirectory()) {
+      continue;
+    }
+    entries.push({
+      name: formatRootDirectoryName(absolute),
+      path: absolute,
+    });
+  }
+
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+
+  const filtered = term.length === 0
+    ? entries
+    : entries.filter((entry) =>
+        entry.name.toLowerCase().includes(term) || entry.path.toLowerCase().includes(term),
+      );
+
+  const limited = term.length === 0 ? filtered : filtered.slice(0, MAX_DIRECTORY_RESULTS);
+
+  return {
+    path: "",
+    parent: null as string | null,
+    entries: limited,
+  };
+};
+
+const resolveDirectoryParent = (directory: string): string | null => {
+  for (const allowed of config.allowedDirectories) {
+    if (directory === allowed) {
+      return DIRECTORY_BROWSER_ROOT;
+    }
+  }
+
+  const candidate = dirname(directory);
+  if (candidate === directory) {
+    return null;
+  }
+
+  try {
+    ensureWithinAllowedDirectories(candidate);
+    return candidate;
+  } catch {
+    return DIRECTORY_BROWSER_ROOT;
+  }
 };
 
 const DIRECTORY_NAME_MAX_LENGTH = 160;
@@ -2105,11 +2446,13 @@ const launchOrchestratorPreset = async (presetId: string) => {
     workingDirectory,
     sessionName ?? undefined,
   );
+  ensureUserWorkspace(session.npub ?? null);
   messageStore.recordSession({
     id: session.id,
     agent: session.agent,
     startedAt: session.startedAt,
     name: session.name,
+    npub: session.npub,
     port: session.port,
     pid: session.pid,
     tmuxSession: session.tmuxSession,
@@ -2190,7 +2533,12 @@ const handleWebhookRequest = async (request: Request, url: URL): Promise<Respons
 };
 
 const listDirectories = async (input: string | null | undefined, query?: string) => {
-  const directory = await ensureDirectory(input);
+  const trimmed = input?.trim() ?? "";
+  if (trimmed.length === 0 || trimmed === DIRECTORY_BROWSER_ROOT) {
+    return listRootDirectories(query);
+  }
+
+  const directory = await ensureDirectory(trimmed);
   const entries = await readdir(directory, { withFileTypes: true });
   const term = query?.toLowerCase().trim();
 
@@ -2208,10 +2556,7 @@ const listDirectories = async (input: string | null | undefined, query?: string)
 
   const limitedDirectories = term ? directories.slice(0, MAX_DIRECTORY_RESULTS) : directories;
 
-  const parent = (() => {
-    const candidate = dirname(directory);
-    return candidate === directory ? null : candidate;
-  })();
+  const parent = resolveDirectoryParent(directory);
 
   return {
     path: directory,
@@ -2225,6 +2570,7 @@ type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 const assetMap: Record<string, { path: string; type: string }> = {
   "/app.js": { path: "./ui/app.js", type: "application/javascript; charset=utf-8" },
   "/styles.css": { path: "./ui/styles.css", type: "text/css; charset=utf-8" },
+  "/identity/index.js": { path: "./ui/identity/index.js", type: "application/javascript; charset=utf-8" },
 };
 
 const resolveAsset = (pathname: string) => {
@@ -2284,6 +2630,94 @@ const serveAceBuildsAsset = (pathname: string) => {
       "cache-control": "public, max-age=86400",
     },
   });
+};
+
+const rewriteVendorModuleSpecifiers = (source: string) => {
+  let updated = source;
+  for (const packageName of Object.keys(vendorPackages)) {
+    if (!updated.includes(packageName)) continue;
+    const vendorPrefix = `/vendor/${packageName}`;
+    updated = updated.replaceAll(`'${packageName}`, `'${vendorPrefix}`);
+    updated = updated.replaceAll(`"${packageName}`, `"${vendorPrefix}`);
+    updated = updated.replaceAll(`\`${packageName}`, `\`${vendorPrefix}`);
+  }
+  return updated;
+};
+
+const serveVendorModule = async (pathname: string): Promise<Response | undefined> => {
+  if (!pathname.startsWith("/vendor/")) return undefined;
+  const suffix = pathname.slice("/vendor/".length);
+  if (!suffix) return undefined;
+
+  const segments = suffix.split("/").filter((segment) => segment.length > 0);
+  if (segments.length === 0) return undefined;
+  if (segments.some((segment) => segment === "." || segment === "..")) return undefined;
+
+  let packageName: string;
+  let relativeSegments: string[];
+  if (segments[0].startsWith("@")) {
+    if (segments.length < 2) return undefined;
+    packageName = `${segments[0]}/${segments[1]}`;
+    relativeSegments = segments.slice(2);
+  } else {
+    packageName = segments[0];
+    relativeSegments = segments.slice(1);
+  }
+  if (relativeSegments.some((segment) => segment === "." || segment === "..")) return undefined;
+
+  const vendor = vendorPackages[packageName];
+  if (!vendor) return undefined;
+  const relativePath = relativeSegments.length > 0 ? join(...relativeSegments) : vendor.entry;
+  const resolveCandidate = (basePath: string) => {
+    const normalized = normalize(join(vendor.root, basePath));
+    if (!normalized.startsWith(vendor.boundary)) {
+      return undefined;
+    }
+    const attemptPaths: string[] = [];
+    const extension = extname(normalized);
+    if (extension) {
+      attemptPaths.push(normalized);
+    } else {
+      attemptPaths.push(`${normalized}.js`, join(normalized, "index.js"));
+      if (vendor.entry && vendor.entry !== "index.js") {
+        attemptPaths.push(join(normalized, vendor.entry));
+      }
+    }
+    for (const attempt of attemptPaths) {
+      const attemptFile = Bun.file(attempt);
+      if (attemptFile.size) {
+        return { file: attemptFile, path: attempt };
+      }
+    }
+    return undefined;
+  };
+  const resolved = resolveCandidate(relativePath);
+  if (!resolved) {
+    console.warn(`[static] failed to resolve vendor asset: ${pathname}`);
+    return undefined;
+  }
+
+  const { file, path: resolvedPath } = resolved;
+  const extension = extname(resolvedPath).toLowerCase();
+  const type =
+    extension === ".js"
+      ? "application/javascript; charset=utf-8"
+      : extension === ".json" || extension === ".map"
+        ? "application/json; charset=utf-8"
+        : file.type || undefined;
+
+  const headers: Record<string, string> = {
+    ...(type ? { "content-type": type } : {}),
+    "cache-control": "public, max-age=86400",
+  };
+
+  if (extension === ".js") {
+    const source = await file.text();
+    const rewritten = rewriteVendorModuleSpecifiers(source);
+    return new Response(rewritten, { headers });
+  }
+
+  return new Response(file, { headers });
 };
 
 const serveIndex = () => {
@@ -2456,7 +2890,12 @@ const ensureWingmanCoreRegistration = async () => {
 
 void ensureWingmanCoreRegistration();
 
-const handleApi = async (request: Request, url: URL, method: HttpMethod): Promise<Response> => {
+const handleApi = async (
+  request: Request,
+  url: URL,
+  method: HttpMethod,
+  authContext: RequestAuthContext,
+): Promise<Response> => {
   const pathname = url.pathname;
   if (pathname === "/api/system/restart/status" && method === "GET") {
     return Response.json({
@@ -2537,6 +2976,67 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
       status: "scheduled",
       sessions: marker.sessionIds ?? [],
     }, { status: 202 });
+  }
+
+  if (pathname === "/api/auth/session" && method === "POST") {
+    let payload: unknown;
+    try {
+      payload = await request.json();
+    } catch {
+      return Response.json({ error: "Invalid JSON payload" }, { status: 400 });
+    }
+
+    if (!payload || typeof payload !== "object") {
+      return Response.json({ error: "Invalid JSON payload" }, { status: 400 });
+    }
+
+    const { npub, encryptedNsec } = payload as Record<string, unknown>;
+    if (typeof npub !== "string" || npub.trim().length === 0) {
+      return Response.json({ error: "npub is required" }, { status: 400 });
+    }
+
+    const trimmedNpub = npub.trim();
+    if (typeof encryptedNsec !== "undefined" && encryptedNsec !== null && typeof encryptedNsec !== "string") {
+      return Response.json({ error: "encryptedNsec must be a string" }, { status: 400 });
+    }
+
+    try {
+      const existingSession = authContext.session;
+      if (existingSession && existingSession.npub !== trimmedNpub) {
+        // Allow overwriting with a new npub, but clear stale signed data by minting a new cookie.
+      }
+
+      const { cookie, expiresAt, payload } = mintSessionCookie(trimmedNpub);
+      authContext.npub = payload.npub;
+      authContext.session = payload;
+      delete authContext.error;
+      const headers = new Headers({
+        "cache-control": "no-store",
+      });
+      headers.append("set-cookie", cookie);
+      return Response.json({ expiresAt }, { headers });
+    } catch (error) {
+      if (error instanceof SessionCookieError) {
+        return Response.json({ error: error.message }, { status: 400 });
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return Response.json({ error: `Failed to mint session cookie: ${message}` }, { status: 500 });
+    }
+  }
+
+  if (pathname === "/api/auth/session" && method === "DELETE") {
+    const headers = new Headers({
+      "cache-control": "no-store",
+    });
+    const secureFlag = shouldUseSecureCookies() ? "; Secure" : "";
+    headers.append(
+      "set-cookie",
+      `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT${secureFlag}`,
+    );
+    authContext.npub = null;
+    authContext.session = null;
+    delete authContext.error;
+    return new Response(null, { status: 204, headers });
   }
 
   if (pathname === "/api/apps" && method === "GET") {
@@ -2812,6 +3312,7 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
       agentPortStart: config.agentPortStart,
       agentPortMax: config.agentPortMax,
       defaultDirectory: config.defaultWorkingDirectory,
+      allowedDirectories: config.allowedDirectories,
       agents: Object.entries(config.agents).map(([key, definition]) => ({
         id: key,
         label: definition.label,
@@ -3301,9 +3802,11 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
       return Response.json({ error: "Only image uploads are supported" }, { status: 400 });
     }
 
+    const userNpub = authContext.npub ?? null;
+    const imageSegment = deriveNpubSegment(userNpub);
     let directory: string;
     try {
-      directory = await ensureImageDirectory(agent);
+      directory = await ensureImageDirectory(agent, userNpub);
     } catch (error) {
       console.error("[uploads] failed to ensure directory", error);
       return Response.json({ error: "Failed to prepare image storage" }, { status: 500 });
@@ -3319,8 +3822,8 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
       return Response.json({ error: "Failed to store image" }, { status: 500 });
     }
 
-    const relativePath = normalize(join(agent, filename)).replace(/\\/g, "/");
-    const publicPath = `/uploads/images/${relativePath}`;
+      const relativePath = normalize(join(imageSegment, agent, filename)).replace(/\\/g, "/");
+      const publicPath = `/uploads/images/${relativePath}`;
     const placeholder = buildAgentImagePlaceholder(agent, diskPath, `${publicPath}`);
 
     return Response.json({
@@ -3351,9 +3854,11 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
       return Response.json({ error: "File upload payload is required" }, { status: 400 });
     }
 
+    const userNpub = authContext.npub ?? null;
+    const attachmentSegment = deriveNpubSegment(userNpub);
     let directory: string;
     try {
-      directory = await ensureAttachmentDirectory(agent);
+      directory = await ensureAttachmentDirectory(agent, userNpub);
     } catch (error) {
       console.error("[uploads] failed to ensure attachment directory", error);
       return Response.json({ error: "Failed to prepare file storage" }, { status: 500 });
@@ -3379,7 +3884,7 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
         return Response.json({ error: "Failed to store file" }, { status: 500 });
       }
 
-      const relativePath = normalize(join(agent, filename)).replace(/\\/g, "/");
+      const relativePath = normalize(join(attachmentSegment, agent, filename)).replace(/\\/g, "/");
       const publicPath = `/uploads/files/${relativePath}`;
       const placeholder = buildAgentFilePlaceholder(agent, diskPath, publicPath, file.name);
       results.push({
@@ -3398,8 +3903,45 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
   }
 
   if (pathname === "/api/sessions" && method === "GET") {
-    const sessions = manager.listSessions();
-    return Response.json({ sessions });
+    const allSessions = manager.listSessions();
+    const filterParam = url.searchParams.get("npub");
+
+    const normalizeFilterValue = (value: string | null): string | null | "__anonymous__" => {
+      if (!value || value === "all") return null;
+      if (value === "__anonymous__") return "__anonymous__";
+      const normalized = normaliseNpub(value);
+      return normalized ?? null;
+    };
+
+    const filterValue = normalizeFilterValue(filterParam);
+    const filteredSessions = allSessions.filter((session) => {
+      if (filterValue === null) {
+        return true;
+      }
+      const sessionNormalized = normaliseNpub(session.npub ?? null);
+      if (filterValue === "__anonymous__") {
+        return sessionNormalized === null;
+      }
+      return sessionNormalized === filterValue;
+    });
+
+    const identities = buildIdentitySummaries(allSessions);
+    const npubFilters = identities.map((identity) => ({
+      value: identity.normalizedNpub ?? "__anonymous__",
+      npub: identity.npub,
+      label: identity.npub ?? "Anonymous",
+      sessionCount: identity.sessionIds.length,
+      activeCount: identity.activeSessionIds.length,
+    }));
+
+    return Response.json({
+      sessions: filteredSessions,
+      identities,
+      filters: {
+        npubs: npubFilters,
+        active: filterValue,
+      },
+    });
   }
 
   if (pathname.startsWith("/api/orchestrators/")) {
@@ -3469,6 +4011,7 @@ const handleApi = async (request: Request, url: URL, method: HttpMethod): Promis
         agent: session.agent,
         startedAt: session.startedAt,
         name: session.name,
+        npub: session.npub,
         port: session.port,
         pid: session.pid,
         tmuxSession: session.tmuxSession,
@@ -3581,95 +4124,110 @@ const server = Bun.serve({
   port: config.port,
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    const pathname = url.pathname;
     const method = request.method as HttpMethod;
+    const authContext = resolveRequestAuthContext(request);
 
-    const webhookResponse = await handleWebhookRequest(request, url);
-    if (webhookResponse) {
-      return webhookResponse;
-    }
-
-    if (pathname === "/" && method === "GET") {
-      return Response.redirect(`${url.origin}/home`, 302);
-    }
-
-    if (method === "GET" && pathname === "/deep-dive/config.json") {
-      const port = getDeepDivePort();
-      const running = isDeepDiveProcessRunning();
-      const override = Bun.env.DEEP_DIVE_SOCKET_URL?.trim();
-      let socketUrl = override && override.length > 0 ? override : null;
-
-      if (!socketUrl && running && port) {
-        const protocol = url.protocol === "https:" ? "wss" : "ws";
-        socketUrl = `${protocol}://${url.hostname}:${port}/deep-dive/socket`;
+    return runWithRequestContext(authContext, async () => {
+      if (authContext.error) {
+        console.warn(`[auth] ignoring invalid session cookie: ${authContext.error}`);
       }
 
-      return Response.json(
-        {
-          socketUrl,
-          running,
-          port: socketUrl && port ? port : null,
-        },
-        {
-          headers: {
-            "cache-control": "no-cache",
+      const pathname = url.pathname;
+
+      const webhookResponse = await handleWebhookRequest(request, url);
+      if (webhookResponse) {
+        return webhookResponse;
+      }
+
+      if (pathname === "/" && method === "GET") {
+        return Response.redirect(`${url.origin}/home`, 302);
+      }
+
+      if (method === "GET" && pathname === "/deep-dive/config.json") {
+        const port = getDeepDivePort();
+        const running = isDeepDiveProcessRunning();
+        const override = Bun.env.DEEP_DIVE_SOCKET_URL?.trim();
+        let socketUrl = override && override.length > 0 ? override : null;
+
+        if (!socketUrl && running && port) {
+          const protocol = url.protocol === "https:" ? "wss" : "ws";
+          socketUrl = `${protocol}://${url.hostname}:${port}/deep-dive/socket`;
+        }
+
+        return Response.json(
+          {
+            socketUrl,
+            running,
+            port: socketUrl && port ? port : null,
           },
-        },
-      );
-    }
-
-    if (
-      pathname === "/home" ||
-      pathname === "/apps" ||
-      pathname.startsWith("/apps/") ||
-      pathname === "/docs" ||
-      pathname.startsWith("/docs/") ||
-      pathname === "/files" ||
-      pathname.startsWith("/files/") ||
-      pathname === "/live" ||
-      pathname.startsWith("/live/")
-    ) {
-      return serveIndex();
-    }
-
-    if (method === "GET" && isDeepDivePagePath(pathname)) {
-      const deepDivePage = servePublicAsset("/deep-dive.html");
-      if (deepDivePage) {
-        return deepDivePage;
+          {
+            headers: {
+              "cache-control": "no-cache",
+            },
+          },
+        );
       }
-      return new Response("Deep Dive page missing", { status: 404 });
-    }
 
-    if (pathname.startsWith("/api/")) {
-      return handleApi(request, url, method);
-    }
+      if (
+        pathname === "/home" ||
+        pathname === "/apps" ||
+        pathname.startsWith("/apps/") ||
+        pathname === "/docs" ||
+        pathname.startsWith("/docs/") ||
+        pathname === "/files" ||
+        pathname.startsWith("/files/") ||
+        pathname === "/live" ||
+        pathname.startsWith("/live/") ||
+        pathname === "/settings" ||
+        pathname.startsWith("/settings/")
+      ) {
+        return serveIndex();
+      }
 
-    const tempAttachment = resolveTempAttachment(pathname);
-    if (tempAttachment) {
-      return tempAttachment;
-    }
+      if (method === "GET" && isDeepDivePagePath(pathname)) {
+        const deepDivePage = servePublicAsset("/deep-dive.html");
+        if (deepDivePage) {
+          return deepDivePage;
+        }
+        return new Response("Deep Dive page missing", { status: 404 });
+      }
 
-    const tempImage = resolveTempImage(pathname);
-    if (tempImage) {
-      return tempImage;
-    }
+      if (pathname.startsWith("/api/")) {
+        return handleApi(request, url, method, authContext);
+      }
 
-    const aceAsset = serveAceBuildsAsset(pathname);
-    if (aceAsset) {
-      return aceAsset;
-    }
+      const tempAttachment = resolveTempAttachment(pathname, authContext);
+      if (tempAttachment) {
+        return tempAttachment;
+      }
 
-    const assetResponse = resolveAsset(pathname);
-    if (assetResponse) {
-      return assetResponse;
-    }
+      const tempImage = resolveTempImage(pathname, authContext);
+      if (tempImage) {
+        return tempImage;
+      }
 
-    const publicAsset = servePublicAsset(pathname);
-    if (publicAsset) {
-      return publicAsset;
-    }
+      const aceAsset = serveAceBuildsAsset(pathname);
+      if (aceAsset) {
+        return aceAsset;
+      }
 
-    return new Response("Not Found", { status: 404 });
+      const vendorAsset = await serveVendorModule(pathname);
+      if (vendorAsset) {
+        return vendorAsset;
+      }
+
+      const assetResponse = resolveAsset(pathname);
+      if (assetResponse) {
+        return assetResponse;
+      }
+
+      const publicAsset = servePublicAsset(pathname);
+      if (publicAsset) {
+        return publicAsset;
+      }
+
+      return new Response("Not Found", { status: 404 });
+    });
   },
 });
 

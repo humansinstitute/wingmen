@@ -6,7 +6,7 @@ Wingman V2 centers on Bun services in `src/`. `src/server.ts` exposes the HTTP A
 
 ## Build, Test, and Development Commands
 
-Run `bun install` after pulling dependencies. Start the orchestrator locally with `bun start` (alias `bun run src/index.ts`), which respects environment settings from `src/config.ts`. Use `bun run --watch src/index.ts` while iterating to reload on change. Execute `bun test` to run TypeScript tests; add focused runs with `bun test path/to/file.test.ts`.
+Run `bun install` after pulling dependencies. Start the orchestrator locally with `bun start` (alias `bun run src/index.ts`), which respects environment settings from `src/config.ts`. Use `bun run --watch src/index.ts` while iterating to reload on change. Execute `bun test` to run TypeScript tests; add focused runs with `bun test path/to/file.test.ts`. The browser-side bunker client is pre-bundled; when applesauce dependencies change, regenerate it with `bun run build:bunker-client` before serving the dashboard.
 
 ## Coding Style & Naming Conventions
 

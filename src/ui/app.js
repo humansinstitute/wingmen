@@ -2,6 +2,7 @@ import "/ace-builds/src-noconflict/ace.js";
 import "/ace-builds/src-noconflict/mode-text.js";
 import "/ace-builds/src-noconflict/theme-chrome.js";
 import "/ace-builds/src-noconflict/theme-tomorrow_night.js";
+import "./identity/index.js";
 
 const ace = globalThis.ace;
 if (!ace) {
@@ -23,6 +24,11 @@ let appsPollInFlight = false;
 const state = {
   config: null,
   sessions: [],
+  identitySummaries: [],
+  sessionFilters: {
+    npub: "all",
+    options: [],
+  },
   orchestratorPresets: [],
   orchestratorPresetsLoading: false,
   orchestratorPresetsLoaded: false,
@@ -127,6 +133,12 @@ const state = {
     dirty: false,
     requestId: 0,
   },
+  identity: {
+    method: "none",
+    npub: null,
+    expiresAt: null,
+    authenticated: false,
+  },
 };
 
 try {
@@ -137,6 +149,797 @@ try {
 } catch {
   // Ignore storage errors (e.g., during private browsing)
 }
+
+const IDENTITY_STORAGE_KEY = "wingman-identity-state";
+const IDENTITY_EVENT_NAMES = ["wingman:identity-state", "identity:state", "nostr-auth:state"];
+
+const identityDomEntries = new Set();
+const identityDomEntryByNode = new WeakMap();
+const identityCopyFeedbackTimeouts = new WeakMap();
+const identityButtonTimers = new WeakMap();
+let identityCountdownIntervalId = null;
+
+const clearButtonStateTimer = (button) => {
+  if (!button) return;
+  const timerId = identityButtonTimers.get(button);
+  if (timerId) {
+    window.clearTimeout(timerId);
+    identityButtonTimers.delete(button);
+  }
+};
+
+const ensureButtonOriginalLabel = (button) => {
+  if (!button) return;
+  if (!button.dataset.originalLabel) {
+    button.dataset.originalLabel = button.textContent ?? "";
+  }
+};
+
+const resetButtonState = (button) => {
+  if (!button) return;
+  clearButtonStateTimer(button);
+  const originalLabel = button.dataset.originalLabel;
+  if (typeof originalLabel === "string") {
+    button.textContent = originalLabel;
+  }
+  delete button.dataset.state;
+  button.removeAttribute("aria-busy");
+};
+
+const setButtonState = (button, options = {}) => {
+  if (!button) return;
+  ensureButtonOriginalLabel(button);
+  const { state, label, disable, restoreAfterMs } = options;
+  if (state) {
+    button.dataset.state = state;
+    if (state === "loading") {
+      button.setAttribute("aria-busy", "true");
+    } else {
+      button.removeAttribute("aria-busy");
+    }
+  } else {
+    delete button.dataset.state;
+    button.removeAttribute("aria-busy");
+  }
+  if (typeof label === "string") {
+    button.textContent = label;
+  }
+  if (typeof disable === "boolean") {
+    button.disabled = disable;
+  }
+  if (restoreAfterMs && restoreAfterMs > 0) {
+    clearButtonStateTimer(button);
+    const timerId = window.setTimeout(() => {
+      resetButtonState(button);
+      identityButtonTimers.delete(button);
+    }, restoreAfterMs);
+    identityButtonTimers.set(button, timerId);
+  }
+};
+
+const identityMethodLabels = {
+  none: "Not signed in",
+  nip07: "Browser extension",
+  local_keys: "Local keys",
+  bunker: "Bunker remote signer",
+};
+
+const isFiniteNumber = (value) => typeof value === "number" && Number.isFinite(value);
+
+const toFiniteTimestamp = (value) => {
+  if (isFiniteNumber(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.getTime();
+  }
+  return null;
+};
+
+const abbreviateNpub = (npub) => {
+  if (!npub || typeof npub !== "string") return "";
+  if (npub.length <= 20) return npub;
+  return `${npub.slice(0, 12)}…${npub.slice(-6)}`;
+};
+
+const formatIdentityDuration = (ms) => {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const parts = [];
+  if (days > 0) parts.push(`${days}d`);
+  if (hours > 0 || days > 0) parts.push(`${hours}h`);
+  if (minutes > 0 && parts.length < 3) parts.push(`${minutes}m`);
+  if (parts.length < 3) parts.push(`${seconds}s`);
+  return parts.join(" ");
+};
+
+const showIdentityCopyFeedback = (message, { error = false, entry } = {}) => {
+  const targets = entry ? [entry] : Array.from(identityDomEntries);
+  targets.forEach((target) => {
+    const feedback = target.copyFeedback;
+    if (!feedback) return;
+    feedback.textContent = message;
+    feedback.hidden = false;
+    if (error) {
+      feedback.dataset.state = "error";
+    } else {
+      feedback.dataset.state = "success";
+    }
+    const existingTimeout = identityCopyFeedbackTimeouts.get(target);
+    if (existingTimeout) {
+      window.clearTimeout(existingTimeout);
+    }
+    const timeoutId = window.setTimeout(() => {
+      const currentFeedback = target.copyFeedback;
+      if (!currentFeedback) return;
+      currentFeedback.hidden = true;
+      delete currentFeedback.dataset.state;
+    }, 2000);
+    identityCopyFeedbackTimeouts.set(target, timeoutId);
+    if (target.copyButton) {
+      setButtonState(target.copyButton, {
+        state: error ? "error" : "success",
+        label: error ? "Copy failed" : "Copied",
+        disable: false,
+        restoreAfterMs: error ? 2500 : 1500,
+      });
+    }
+  });
+};
+
+const stopIdentityCountdown = () => {
+  if (identityCountdownIntervalId !== null) {
+    window.clearInterval(identityCountdownIntervalId);
+    identityCountdownIntervalId = null;
+  }
+};
+
+const updateIdentityCountdown = () => {
+  pruneIdentityDomEntries();
+  const expiresAt = state.identity.expiresAt;
+  const authenticated = state.identity.authenticated;
+  const expirationKnown = isFiniteNumber(expiresAt);
+  identityDomEntries.forEach((entry) => {
+    const expiry = entry.expiry;
+    if (!expiry) return;
+    if (!expirationKnown) {
+      expiry.textContent = authenticated ? "Session expiry unknown" : "—";
+      expiry.dataset.state = authenticated ? "unknown" : "inactive";
+      expiry.title = "";
+      return;
+    }
+    const remaining = expiresAt - Date.now();
+    if (remaining <= 0) {
+      expiry.textContent = "Session expired";
+      expiry.dataset.state = "expired";
+      expiry.title = new Date(expiresAt).toLocaleString();
+      return;
+    }
+    expiry.textContent = `Expires in ${formatIdentityDuration(remaining)}`;
+    expiry.dataset.state = "active";
+    expiry.title = new Date(expiresAt).toLocaleString();
+  });
+  if (expirationKnown && expiresAt - Date.now() <= 0) {
+    stopIdentityCountdown();
+  }
+};
+
+const startIdentityCountdown = () => {
+  stopIdentityCountdown();
+  if (!state.identity.authenticated || !isFiniteNumber(state.identity.expiresAt)) {
+    return;
+  }
+  const hasExpiryTarget = Array.from(identityDomEntries).some((entry) => Boolean(entry.expiry));
+  if (!hasExpiryTarget) {
+    return;
+  }
+  updateIdentityCountdown();
+  identityCountdownIntervalId = window.setInterval(() => {
+    updateIdentityCountdown();
+  }, 1000);
+};
+
+const persistIdentityState = (identity) => {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    if (identity.npub) {
+      const payload = {
+        npub: identity.npub,
+        method: identity.method,
+        expiresAt: identity.expiresAt ?? null,
+      };
+      window.localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(payload));
+    } else {
+      window.localStorage.removeItem(IDENTITY_STORAGE_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const syncIdentityDisplayForEntry = (entry) => {
+  const { npub, method, authenticated, expiresAt } = state.identity;
+  if (entry.root) {
+    if (authenticated) {
+      entry.root.dataset.authenticated = "true";
+    } else {
+      delete entry.root.dataset.authenticated;
+    }
+  }
+  if (entry.npub) {
+    if (npub) {
+      entry.npub.textContent = abbreviateNpub(npub);
+      entry.npub.title = npub;
+    } else {
+      entry.npub.textContent = "Not signed in";
+      entry.npub.removeAttribute("title");
+    }
+  }
+  if (entry.method) {
+    entry.method.textContent = authenticated ? (identityMethodLabels[method] ?? method ?? "Unknown") : "—";
+  }
+  if (entry.copyButton) {
+    if (!npub) {
+      resetButtonState(entry.copyButton);
+      entry.copyButton.disabled = true;
+    } else {
+      entry.copyButton.disabled = false;
+    }
+  }
+  if (entry.logoutButton) {
+    if (!authenticated) {
+      resetButtonState(entry.logoutButton);
+      entry.logoutButton.disabled = true;
+    } else {
+      entry.logoutButton.disabled = false;
+    }
+  }
+  if (entry.copyFeedback && !npub) {
+    entry.copyFeedback.hidden = true;
+    delete entry.copyFeedback.dataset.state;
+  }
+  if (entry.expiry) {
+    if (!authenticated) {
+      entry.expiry.textContent = "—";
+      entry.expiry.dataset.state = "inactive";
+      entry.expiry.removeAttribute("title");
+    } else if (!isFiniteNumber(expiresAt)) {
+      entry.expiry.textContent = "Session expiry unknown";
+      entry.expiry.dataset.state = "unknown";
+      entry.expiry.removeAttribute("title");
+    } else {
+      updateIdentityCountdown();
+    }
+  }
+};
+
+const syncIdentityDisplay = () => {
+  pruneIdentityDomEntries();
+  identityDomEntries.forEach((entry) => {
+    syncIdentityDisplayForEntry(entry);
+  });
+  if (state.identity.authenticated && isFiniteNumber(state.identity.expiresAt)) {
+    startIdentityCountdown();
+  } else {
+    stopIdentityCountdown();
+  }
+};
+
+const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
+  if (!partial || typeof partial !== "object") {
+    return state.identity;
+  }
+  const current = state.identity;
+  const next = {
+    method: current.method,
+    npub: current.npub,
+    expiresAt: current.expiresAt,
+    authenticated: current.authenticated,
+  };
+
+  if ("isAuthenticated" in partial && partial.isAuthenticated === false) {
+    next.method = "none";
+    next.npub = null;
+    next.expiresAt = null;
+  }
+
+  if ("method" in partial && typeof partial.method === "string" && partial.method.length > 0) {
+    next.method = partial.method;
+  }
+
+  if ("npub" in partial) {
+    if (typeof partial.npub === "string" && partial.npub.trim().length > 0) {
+      next.npub = partial.npub.trim();
+    } else if (partial.npub === null) {
+      next.npub = null;
+    }
+  } else if (typeof partial.pubkey === "string" && partial.pubkey.trim().length > 0 && !next.npub) {
+    next.npub = partial.pubkey.trim();
+  }
+
+  const expiryCandidate =
+    "expiresAt" in partial
+      ? partial.expiresAt
+      : "sessionExpiresAt" in partial
+        ? partial.sessionExpiresAt
+        : "expiry" in partial
+          ? partial.expiry
+          : undefined;
+  if (expiryCandidate !== undefined) {
+    const timestamp = toFiniteTimestamp(expiryCandidate);
+    next.expiresAt = timestamp;
+  }
+
+  if (!next.npub) {
+    next.method = "none";
+    next.expiresAt = null;
+  }
+
+  next.authenticated = Boolean(next.npub);
+
+  const changed =
+    next.method !== current.method ||
+    next.npub !== current.npub ||
+    next.expiresAt !== current.expiresAt ||
+    next.authenticated !== current.authenticated;
+
+  if (!changed) {
+    return current;
+  }
+
+  state.identity = next;
+
+  if (persist) {
+    persistIdentityState(next);
+  }
+
+  syncIdentityDisplay();
+
+  if (emit && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+    try {
+      window.dispatchEvent(new CustomEvent("wingman:identity-ui-state", { detail: { ...next } }));
+    } catch {
+      // ignore dispatch errors
+    }
+  }
+
+  return next;
+};
+
+const handleIdentityCopy = async (event, entryOverride) => {
+  if (event?.preventDefault) {
+    event.preventDefault();
+  }
+  const entry = entryOverride ?? (event?.currentTarget ? identityDomEntryByNode.get(event.currentTarget) : null);
+  const npub = state.identity.npub;
+  if (!npub) {
+    if (entry?.copyButton) {
+      resetButtonState(entry.copyButton);
+    }
+    return;
+  }
+  if (entry?.copyButton) {
+    setButtonState(entry.copyButton, { state: "loading", label: "Copying…", disable: true });
+  }
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      await navigator.clipboard.writeText(npub);
+      showIdentityCopyFeedback("Copied", { entry });
+      return;
+    }
+  } catch (error) {
+    console.warn("[identity] clipboard write failed", error);
+  }
+
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = npub;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "absolute";
+    textarea.style.left = "-9999px";
+    document.body.append(textarea);
+    textarea.select();
+    const success = document.execCommand("copy");
+    textarea.remove();
+    if (success) {
+      showIdentityCopyFeedback("Copied", { entry });
+      return;
+    }
+  } catch (error) {
+    console.warn("[identity] fallback copy failed", error);
+  }
+
+  showIdentityCopyFeedback("Copy failed", { error: true, entry });
+};
+
+const clearCachedIdentity = () => {
+  try {
+    globalThis.wingmanIdentity?.sessionCache?.clear?.();
+  } catch (error) {
+    console.warn("[identity] failed to clear session cache", error);
+  }
+  try {
+    globalThis.wingmanIdentity?.passwordMeta?.clear?.();
+  } catch (error) {
+    console.warn("[identity] failed to clear password metadata", error);
+  }
+};
+
+const forceIdentityLogoutState = () => {
+  clearCachedIdentity();
+  updateIdentityState({ npub: null, method: "none", expiresAt: null, isAuthenticated: false });
+  if (typeof window !== "undefined") {
+    try {
+      window.dispatchEvent(new CustomEvent("wingman:identity-logout"));
+    } catch {
+      // ignore dispatch failures
+    }
+  }
+};
+
+const requestServerLogout = async () => {
+  const response = await fetch("/api/auth/session", {
+    method: "DELETE",
+    credentials: "include",
+    headers: { "cache-control": "no-store" },
+  });
+  if (!response.ok && response.status !== 204) {
+    const data = await response.json().catch(() => ({}));
+    const message =
+      data && typeof data === "object" && typeof data.error === "string"
+        ? data.error
+        : `Failed to clear session (${response.status})`;
+    throw new Error(message);
+  }
+};
+
+const handleIdentityLogout = async (event, entryOverride) => {
+  if (event?.preventDefault) {
+    event.preventDefault();
+  }
+  identityDomEntries.forEach((entry) => {
+    if (entry.logoutButton) {
+      setButtonState(entry.logoutButton, { state: "loading", label: "Logging out…", disable: true });
+    }
+  });
+  let logoutSuccessful = false;
+  const sources = [globalThis.wingmanIdentity, globalThis.identity];
+  for (const source of sources) {
+    if (source && typeof source.logoutIdentity === "function") {
+      try {
+        await source.logoutIdentity();
+        logoutSuccessful = true;
+        break;
+      } catch (error) {
+        console.error("[identity] logout failed", error);
+        const message = error instanceof Error ? error.message : "Failed to sign out";
+        window.alert(message);
+      }
+    }
+  }
+
+  if (!logoutSuccessful) {
+    try {
+      await requestServerLogout();
+      logoutSuccessful = true;
+    } catch (error) {
+      console.error("[identity] server logout failed", error);
+      const message = error instanceof Error ? error.message : "Failed to clear session on server.";
+      window.alert(message);
+    }
+  }
+
+  if (logoutSuccessful) {
+    forceIdentityLogoutState();
+    identityDomEntries.forEach((entry) => {
+      if (entry.logoutButton) {
+        setButtonState(entry.logoutButton, {
+          state: "success",
+          label: "Logged out",
+          disable: true,
+          restoreAfterMs: 1500,
+        });
+      }
+    });
+  } else {
+    identityDomEntries.forEach((entry) => {
+      if (entry.logoutButton) {
+        setButtonState(entry.logoutButton, {
+          state: "error",
+          label: "Retry logout",
+          disable: false,
+          restoreAfterMs: 2500,
+        });
+      }
+    });
+  }
+};
+
+const detachIdentityDomEntry = (entry) => {
+  if (!entry) return;
+  if (entry.copyButton && entry.copyHandler) {
+    entry.copyButton.removeEventListener("click", entry.copyHandler);
+    identityDomEntryByNode.delete(entry.copyButton);
+    resetButtonState(entry.copyButton);
+  }
+  if (entry.logoutButton && entry.logoutHandler) {
+    entry.logoutButton.removeEventListener("click", entry.logoutHandler);
+    identityDomEntryByNode.delete(entry.logoutButton);
+    resetButtonState(entry.logoutButton);
+  }
+  const timeoutId = identityCopyFeedbackTimeouts.get(entry);
+  if (timeoutId) {
+    window.clearTimeout(timeoutId);
+    identityCopyFeedbackTimeouts.delete(entry);
+  }
+};
+
+const pruneIdentityDomEntries = () => {
+  const staleEntries = [];
+  identityDomEntries.forEach((entry) => {
+    if (!entry.root || !entry.root.isConnected) {
+      staleEntries.push(entry);
+    }
+  });
+  staleEntries.forEach((entry) => {
+    detachIdentityDomEntry(entry);
+    identityDomEntries.delete(entry);
+  });
+  if (staleEntries.length > 0 && identityDomEntries.size === 0) {
+    stopIdentityCountdown();
+  }
+};
+
+const registerIdentityDom = (root) => {
+  if (!root) return;
+  pruneIdentityDomEntries();
+  let existingEntry = null;
+  identityDomEntries.forEach((entry) => {
+    if (entry.root === root) {
+      existingEntry = entry;
+    }
+  });
+  if (existingEntry) {
+    detachIdentityDomEntry(existingEntry);
+    identityDomEntries.delete(existingEntry);
+  }
+
+  const entry = {
+    root,
+    npub: root.querySelector('[data-role="identity-npub"]'),
+    method: root.querySelector('[data-role="identity-method"]'),
+    expiry: root.querySelector('[data-role="identity-expiry"]'),
+    copyFeedback: root.querySelector('[data-role="identity-copy-feedback"]'),
+    copyButton: root.querySelector('[data-action="copy-active-npub"]'),
+    logoutButton: root.querySelector('[data-action="identity-logout"]'),
+    copyHandler: null,
+    logoutHandler: null,
+  };
+
+  if (entry.copyButton) {
+    ensureButtonOriginalLabel(entry.copyButton);
+    entry.copyHandler = (event) => {
+      void handleIdentityCopy(event, entry);
+    };
+    entry.copyButton.addEventListener("click", entry.copyHandler);
+    identityDomEntryByNode.set(entry.copyButton, entry);
+  }
+
+  if (entry.logoutButton) {
+    ensureButtonOriginalLabel(entry.logoutButton);
+    entry.logoutHandler = (event) => {
+      void handleIdentityLogout(event, entry);
+    };
+    entry.logoutButton.addEventListener("click", entry.logoutHandler);
+    identityDomEntryByNode.set(entry.logoutButton, entry);
+  }
+
+  identityDomEntries.add(entry);
+  syncIdentityDisplayForEntry(entry);
+};
+
+const callIdentityWire = (names, element, ...extraArgs) => {
+  const nameList = Array.isArray(names) ? names : [names];
+  if (!element || typeof element !== "object") return false;
+  if (typeof globalThis === "undefined") return false;
+  const sources = [globalThis.wingmanIdentity, globalThis.identity, globalThis];
+  for (const name of nameList) {
+    for (const source of sources) {
+      if (!source || typeof source !== "object") continue;
+      const candidate = source[name];
+      if (typeof candidate === "function") {
+        try {
+          candidate(element, ...extraArgs);
+          return true;
+        } catch (error) {
+          console.error(`[identity] Failed to wire ${name}:`, error);
+          return true;
+        }
+      }
+    }
+  }
+  return false;
+};
+
+let identityWiringContext = null;
+
+const getIdentityWiringContext = () => {
+  if (identityWiringContext) {
+    return identityWiringContext;
+  }
+  identityWiringContext = {
+    updateIdentityState,
+    getIdentityState: () => ({ ...state.identity }),
+    syncDisplay: syncIdentityDisplay,
+    requestBinding: () => {
+      pruneIdentityDomEntries();
+      identityDomEntries.forEach((entry) => {
+        if (entry.root && entry.root.isConnected) {
+          bindIdentityFlows(entry.root);
+        }
+      });
+    },
+  };
+  return identityWiringContext;
+};
+
+function bindIdentityFlows(root) {
+  if (!root) return;
+  const context = getIdentityWiringContext();
+  const localPanel = root.querySelector('[data-identity-panel="local"]');
+  if (localPanel) {
+    callIdentityWire(["wireLocalIdentityPanel"], localPanel, context);
+  }
+  const nip07Panel = root.querySelector('[data-identity-panel="nip07"]');
+  if (nip07Panel) {
+    callIdentityWire(["wireNip07Login", "wireNip07Panel", "wireNip07"], nip07Panel, context);
+  }
+  const bunkerPanel = root.querySelector('[data-identity-panel="bunker"]');
+  if (bunkerPanel) {
+    callIdentityWire(["wireBunkerLogin"], bunkerPanel, context);
+    callIdentityWire(
+      ["wireBunkerQRScanner"],
+      bunkerPanel,
+      (uri) => {
+        if (!uri) return;
+        const textarea = bunkerPanel.querySelector('textarea[name="bunkerUri"]');
+        if (!textarea) return;
+        textarea.value = uri;
+        textarea.dispatchEvent(new Event("input", { bubbles: true }));
+      },
+      context,
+    );
+  }
+}
+
+const identityWireRequestHandler = () => {
+  pruneIdentityDomEntries();
+  identityDomEntries.forEach((entry) => {
+    if (entry.root && entry.root.isConnected) {
+      bindIdentityFlows(entry.root);
+    }
+  });
+};
+
+const handleIdentityEventPayload = (payload) => {
+  if (!payload || typeof payload !== "object") {
+    return;
+  }
+  const next = {};
+  if ("npub" in payload) {
+    next.npub = typeof payload.npub === "string" ? payload.npub : payload.npub === null ? null : undefined;
+  } else if (typeof payload.pubkey === "string") {
+    next.npub = payload.pubkey;
+  }
+  if (typeof payload.method === "string") {
+    next.method = payload.method;
+  }
+  if ("expiresAt" in payload || "sessionExpiresAt" in payload || "expiry" in payload) {
+    const timestamp = toFiniteTimestamp(
+      "expiresAt" in payload
+        ? payload.expiresAt
+        : "sessionExpiresAt" in payload
+          ? payload.sessionExpiresAt
+          : payload.expiry,
+    );
+    next.expiresAt = timestamp;
+  }
+  if ("isAuthenticated" in payload) {
+    next.isAuthenticated = payload.isAuthenticated;
+  }
+  updateIdentityState(next);
+};
+
+const handleIdentityEvent = (event) => {
+  if (!event) return;
+  if ("detail" in event && event.detail) {
+    handleIdentityEventPayload(event.detail);
+    return;
+  }
+  handleIdentityEventPayload(event);
+};
+
+const setupIdentityEventBridges = () => {
+  if (typeof window === "undefined") return;
+  IDENTITY_EVENT_NAMES.forEach((name) => {
+    window.addEventListener(name, handleIdentityEvent);
+    document.addEventListener(name, handleIdentityEvent);
+  });
+  window.addEventListener("wingman:identity-refresh", () => {
+    syncIdentityDisplay();
+  });
+  window.addEventListener("wingman:identity-wire-request", identityWireRequestHandler);
+};
+
+setupIdentityEventBridges();
+
+const loadPersistedIdentityState = () => {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(IDENTITY_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    updateIdentityState(parsed, { persist: false, emit: false });
+  } catch {
+    // ignore parse errors
+  }
+};
+
+loadPersistedIdentityState();
+
+const handleIdentityStorageEvent = (event) => {
+  if (!event) return;
+  if (event.key !== IDENTITY_STORAGE_KEY) return;
+  if (event.newValue) {
+    try {
+      const parsed = JSON.parse(event.newValue);
+      updateIdentityState(parsed, { persist: false, emit: false });
+    } catch {
+      // ignore parse errors
+    }
+  } else {
+    updateIdentityState({ npub: null, method: "none", expiresAt: null, isAuthenticated: false }, { persist: false, emit: false });
+  }
+};
+
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", handleIdentityStorageEvent);
+}
+
+const attachIdentityUiApi = () => {
+  if (typeof globalThis === "undefined") return;
+  const existing =
+    typeof globalThis.wingmanIdentityUI === "object" && globalThis.wingmanIdentityUI !== null
+      ? globalThis.wingmanIdentityUI
+      : {};
+  const api = {
+    ...existing,
+    getState: () => ({ ...state.identity }),
+    update: (partial, options) => updateIdentityState(partial, options),
+    notify: (partial, options) => updateIdentityState(partial, options),
+    bindPanels: () => {
+      pruneIdentityDomEntries();
+      identityDomEntries.forEach((entry) => {
+        if (entry.root && entry.root.isConnected) {
+          bindIdentityFlows(entry.root);
+        }
+      });
+    },
+    refreshDisplay: () => syncIdentityDisplay(),
+  };
+  globalThis.wingmanIdentityUI = api;
+};
+
+attachIdentityUiApi();
 
 const textDecoder = typeof TextDecoder !== "undefined" ? new TextDecoder("utf-8", { fatal: false }) : null;
 const textEncoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
@@ -2093,6 +2896,9 @@ const pullRefreshIndicator = document.getElementById("pull-refresh");
 const pullRefreshLabel = pullRefreshIndicator?.querySelector(".label");
 const desktopSessionIndicator = document.getElementById("desktop-session-indicator");
 const desktopSessionIndicatorButton = document.getElementById("desktop-session-indicator-button");
+const identityLoginDialog = document.getElementById("identity-login-dialog");
+const identityLoginDialogContent = identityLoginDialog?.querySelector(".wm-identity-dialog__content");
+const identityLoginDialogCloseButton = identityLoginDialog?.querySelector('[data-action="identity-dialog-close"]');
 const desktopSessionIndicatorName =
   desktopSessionIndicator?.querySelector('[data-part="name"]') ?? null;
 const desktopSessionIndicatorDirectory =
@@ -2166,6 +2972,46 @@ const appLogsContent = document.getElementById("app-logs-content");
 const appLogsRefreshButton = document.getElementById("app-logs-refresh");
 const appLogsCloseButton = document.getElementById("app-logs-close");
 const SHARED_TMUX_SESSION = "wingman-apps";
+
+let identityLoginPanelRoot = null;
+
+const ensureIdentityLoginPanel = () => {
+  if (!identityLoginDialogContent) return null;
+  if (!identityLoginPanelRoot) {
+    identityLoginPanelRoot = renderIdentityPanel({ variant: "dialog" });
+    identityLoginDialogContent.append(identityLoginPanelRoot);
+  }
+  return identityLoginPanelRoot;
+};
+
+function openIdentityLoginDialog() {
+  const panel = ensureIdentityLoginPanel();
+  if (!identityLoginDialog || !panel) {
+    navigateToSettings();
+    return;
+  }
+  if (typeof identityLoginDialog.showModal === "function") {
+    identityLoginDialog.showModal();
+  } else {
+    navigateToSettings();
+  }
+}
+
+function closeIdentityLoginDialog() {
+  if (identityLoginDialog?.open) {
+    identityLoginDialog.close();
+  }
+}
+
+identityLoginDialogCloseButton?.addEventListener("click", (event) => {
+  event.preventDefault();
+  closeIdentityLoginDialog();
+});
+
+identityLoginDialog?.addEventListener("cancel", (event) => {
+  event.preventDefault();
+  closeIdentityLoginDialog();
+});
 
 const applyTheme = (theme, persist = true) => {
   currentTheme = theme;
@@ -2423,6 +3269,8 @@ const triggerPullRefresh = () => {
 };
 
 const DIRECTORY_SUGGESTION_DELAY = 160;
+const DIRECTORY_BROWSER_ROOT = "__root__";
+const DIRECTORY_BROWSER_ROOT_LABEL = "Allowed Directories";
 let directorySuggestionTimer = null;
 let directorySuggestionRequestId = 0;
 
@@ -2567,8 +3415,10 @@ const chooseDirectory = (path) => {
 
 const renderDirectoryBrowser = (data) => {
   if (!data) return;
+  const isRootView = !data.path || data.path === DIRECTORY_BROWSER_ROOT;
   if (directoryCurrent) {
-    directoryCurrent.textContent = data.path;
+    const label = isRootView ? DIRECTORY_BROWSER_ROOT_LABEL : data.path;
+    directoryCurrent.textContent = label;
   }
   if (directoryUpButton) {
     directoryUpButton.disabled = !data.parent;
@@ -3020,9 +3870,28 @@ const fetchConfig = async () => {
 };
 
 const fetchSessions = async () => {
-  const response = await fetch("/api/sessions");
+  const activeFilter = state.sessionFilters.npub;
+  const query = activeFilter && activeFilter !== "all" ? `?npub=${encodeURIComponent(activeFilter)}` : "";
+  const response = await fetch(`/api/sessions${query}`);
   const data = await response.json();
-  state.sessions = data.sessions ?? [];
+  state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  state.identitySummaries = Array.isArray(data.identities) ? data.identities : [];
+  const filterPayload = data.filters && typeof data.filters === "object" ? data.filters : null;
+  const npubOptions = filterPayload && Array.isArray(filterPayload.npubs) ? filterPayload.npubs : [];
+  state.sessionFilters.options = npubOptions;
+  const optionValues = new Set([
+    "all",
+    ...npubOptions
+      .filter((option) => option && typeof option === "object" && typeof option.value === "string")
+      .map((option) => option.value),
+  ]);
+  if (filterPayload && typeof filterPayload.active === "string") {
+    state.sessionFilters.npub = filterPayload.active;
+  } else if (filterPayload && filterPayload.active === null) {
+    state.sessionFilters.npub = "all";
+  } else if (!optionValues.has(state.sessionFilters.npub)) {
+    state.sessionFilters.npub = "all";
+  }
 
   const sessionIds = new Set(state.sessions.map((session) => session.id));
   if (state.lastActiveSessionId && !sessionIds.has(state.lastActiveSessionId)) {
@@ -3079,6 +3948,31 @@ const fetchSessions = async () => {
       fetchConversation(state.activeSessionId),
     ]);
   }
+};
+
+const buildSessionFilterOptions = () => {
+  const seen = new Set();
+  const options = [];
+  const appendOption = (value, label, meta = {}) => {
+    if (seen.has(value)) return;
+    seen.add(value);
+    options.push({ value, label, ...meta });
+  };
+
+  appendOption("all", "All identities");
+
+  state.sessionFilters.options.forEach((option) => {
+    if (!option || typeof option !== "object") return;
+    const value = typeof option.value === "string" ? option.value : "__anonymous__";
+    const npub = typeof option.npub === "string" ? option.npub : null;
+    const baseLabel = typeof option.label === "string" && option.label.trim().length > 0 ? option.label.trim() : npub ?? "Anonymous";
+    const sessionCount = typeof option.sessionCount === "number" ? option.sessionCount : 0;
+    const activeCount = typeof option.activeCount === "number" ? option.activeCount : 0;
+    const detail = activeCount > 0 ? `${sessionCount} sessions (${activeCount} active)` : `${sessionCount} sessions`;
+    appendOption(value, `${baseLabel} • ${detail}`, { npub, sessionCount, activeCount });
+  });
+
+  return options;
 };
 
 const fetchLogs = async (sessionId) => {
@@ -3227,6 +4121,11 @@ const pollSessions = async () => {
     await fetchSessions();
     syncMenuTabs();
     syncDesktopSessionIndicator();
+
+    if (currentRoute === "home") {
+      render();
+      return;
+    }
 
     if (currentRoute !== "live") {
       return;
@@ -4886,9 +5785,350 @@ const closeAppLogsDialog = () => {
   }
 };
 
+const renderIdentitySummary = () => {
+  const summary = document.createElement("div");
+  summary.className = "wm-identity-summary";
+
+  const list = document.createElement("dl");
+  list.className = "wm-identity-summary-list";
+
+  const npubLabel = document.createElement("dt");
+  npubLabel.textContent = "Active npub";
+  const npubValue = document.createElement("dd");
+  npubValue.dataset.role = "identity-npub";
+  npubValue.textContent = "Not signed in";
+
+  const methodLabel = document.createElement("dt");
+  methodLabel.textContent = "Method";
+  const methodValue = document.createElement("dd");
+  methodValue.dataset.role = "identity-method";
+  methodValue.textContent = "—";
+
+  const expiryLabel = document.createElement("dt");
+  expiryLabel.textContent = "Session";
+  const expiryValue = document.createElement("dd");
+  expiryValue.dataset.role = "identity-expiry";
+  expiryValue.textContent = "—";
+
+  list.append(npubLabel, npubValue, methodLabel, methodValue, expiryLabel, expiryValue);
+  summary.append(list);
+
+  const actions = document.createElement("div");
+  actions.className = "wm-identity-summary-actions";
+
+  const copyButton = document.createElement("button");
+  copyButton.type = "button";
+  copyButton.className = "wm-button secondary";
+  copyButton.dataset.action = "copy-active-npub";
+  copyButton.textContent = "Copy npub";
+  copyButton.disabled = true;
+  actions.append(copyButton);
+
+  const logoutButton = document.createElement("button");
+  logoutButton.type = "button";
+  logoutButton.className = "wm-button secondary";
+  logoutButton.dataset.action = "identity-logout";
+  logoutButton.textContent = "Logout";
+  actions.append(logoutButton);
+
+  const feedback = document.createElement("span");
+  feedback.className = "wm-identity-copy-feedback";
+  feedback.dataset.role = "identity-copy-feedback";
+  feedback.hidden = true;
+  actions.append(feedback);
+
+  summary.append(actions);
+  return summary;
+};
+
+const renderLocalIdentityPanel = () => {
+  const panel = document.createElement("section");
+  panel.className = "wm-identity-panel";
+  panel.dataset.identityPanel = "local";
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Local Keys";
+  panel.append(heading);
+
+  const description = document.createElement("p");
+  description.className = "wm-identity-panel-description";
+  description.textContent = "Generate or import a keypair stored on this device.";
+  panel.append(description);
+
+  const actions = document.createElement("div");
+  actions.className = "wm-identity-button-row";
+
+  const generateBtn = document.createElement("button");
+  generateBtn.type = "button";
+  generateBtn.className = "wm-button";
+  generateBtn.dataset.action = "generate-keys";
+  generateBtn.textContent = "Generate Keys";
+  actions.append(generateBtn);
+
+  const copyBtn = document.createElement("button");
+  copyBtn.type = "button";
+  copyBtn.className = "wm-button secondary";
+  copyBtn.dataset.action = "copy-nsec";
+  copyBtn.textContent = "Copy nsec";
+  actions.append(copyBtn);
+
+  panel.append(actions);
+
+  const outputs = document.createElement("div");
+  outputs.className = "wm-identity-output";
+
+  const npubLine = document.createElement("div");
+  npubLine.className = "wm-identity-output-line";
+  const npubKeyLabel = document.createElement("span");
+  npubKeyLabel.className = "wm-identity-output-label";
+  npubKeyLabel.textContent = "npub";
+  const npubValue = document.createElement("span");
+  npubValue.className = "wm-identity-output-value";
+  npubValue.dataset.role = "npub";
+  npubLine.append(npubKeyLabel, npubValue);
+  outputs.append(npubLine);
+
+  const nsecOutput = document.createElement("pre");
+  nsecOutput.className = "wm-identity-secret";
+  nsecOutput.dataset.role = "nsec";
+  nsecOutput.setAttribute("hidden", "");
+  outputs.append(nsecOutput);
+
+  panel.append(outputs);
+
+  const importForm = document.createElement("form");
+  importForm.className = "wm-identity-import";
+  importForm.dataset.form = "import-nsec";
+
+  const importLabel = document.createElement("label");
+  importLabel.className = "wm-field-label";
+  importLabel.setAttribute("for", "identity-import-nsec");
+  importLabel.textContent = "Import nsec";
+
+  const importControls = document.createElement("div");
+  importControls.className = "wm-identity-import-controls";
+
+  const importInput = document.createElement("input");
+  importInput.id = "identity-import-nsec";
+  importInput.name = "nsec";
+  importInput.type = "text";
+  importInput.autocomplete = "off";
+  importInput.placeholder = "nsec1...";
+
+  const importSubmit = document.createElement("button");
+  importSubmit.type = "submit";
+  importSubmit.className = "wm-button secondary";
+  importSubmit.textContent = "Sign In";
+
+  importControls.append(importInput, importSubmit);
+  importForm.append(importLabel, importControls);
+  panel.append(importForm);
+
+  return panel;
+};
+
+const renderNip07Panel = () => {
+  const panel = document.createElement("section");
+  panel.className = "wm-identity-panel";
+  panel.dataset.identityPanel = "nip07";
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Browser Extension (NIP-07)";
+  panel.append(heading);
+
+  const description = document.createElement("p");
+  description.className = "wm-identity-panel-description";
+  description.textContent = "Connect using a Nostr extension such as Alby, nos2x, or Flamingo.";
+  panel.append(description);
+
+  const loginButton = document.createElement("button");
+  loginButton.type = "button";
+  loginButton.className = "wm-button";
+  loginButton.dataset.action = "nip07-login";
+  loginButton.textContent = "Connect Extension";
+  panel.append(loginButton);
+
+  const status = document.createElement("p");
+  status.className = "wm-identity-status-line";
+  status.dataset.role = "nip07-status";
+  status.setAttribute("aria-live", "polite");
+  panel.append(status);
+
+  return panel;
+};
+
+const renderBunkerPanel = () => {
+  const panel = document.createElement("section");
+  panel.className = "wm-identity-panel";
+  panel.dataset.identityPanel = "bunker";
+
+  const heading = document.createElement("h3");
+  heading.textContent = "Bunker Remote Signer";
+  panel.append(heading);
+
+  const description = document.createElement("p");
+  description.className = "wm-identity-panel-description";
+  description.textContent = "Connect a remote signer with a bunker:// URI.";
+  panel.append(description);
+
+  const form = document.createElement("form");
+  form.className = "wm-identity-bunker-form";
+  form.dataset.form = "bunker-auth";
+
+  const textarea = document.createElement("textarea");
+  textarea.name = "bunkerUri";
+  textarea.rows = 3;
+  textarea.placeholder = "bunker://...";
+  form.append(textarea);
+
+  const submit = document.createElement("button");
+  submit.type = "submit";
+  submit.className = "wm-button";
+  submit.textContent = "Connect Bunker";
+  form.append(submit);
+
+  panel.append(form);
+
+  const bunkerActions = document.createElement("div");
+  bunkerActions.className = "wm-identity-button-row";
+  const scanButton = document.createElement("button");
+  scanButton.type = "button";
+  scanButton.className = "wm-button secondary";
+  scanButton.dataset.action = "scan-qr";
+  scanButton.textContent = "Scan QR";
+  bunkerActions.append(scanButton);
+  panel.append(bunkerActions);
+
+  const status = document.createElement("p");
+  status.className = "wm-identity-status-line";
+  status.dataset.role = "bunker-status";
+  status.setAttribute("aria-live", "polite");
+  panel.append(status);
+
+  return panel;
+};
+
+const renderIdentityPanel = (options = {}) => {
+  const variant = options.variant ?? "settings";
+  const card = document.createElement("section");
+  card.className = "wm-card";
+  if (variant === "settings") {
+    card.classList.add("wm-settings-identity");
+    card.id = "identity-panel";
+  } else if (variant === "dialog") {
+    card.classList.add("wm-identity-dialog-card");
+  } else {
+    card.classList.add("wm-identity-panel-card");
+  }
+
+  const header = document.createElement("div");
+  header.className = "wm-home-section-header";
+  const title = document.createElement("h2");
+  title.textContent = "Identity";
+  header.append(title);
+  card.append(header);
+
+  const summary = renderIdentitySummary();
+  card.append(summary);
+
+  const panels = document.createElement("div");
+  panels.className = "wm-identity-panels";
+  panels.append(renderLocalIdentityPanel(), renderNip07Panel(), renderBunkerPanel());
+  card.append(panels);
+
+  registerIdentityDom(card);
+  bindIdentityFlows(card);
+
+  return card;
+};
+
+let detachHomeIdentityBannerListener = null;
+
+const renderHomeIdentityBanner = () => {
+  detachHomeIdentityBannerListener?.();
+  const card = document.createElement("section");
+  card.className = "wm-card wm-home-identity-banner";
+
+  const info = document.createElement("div");
+  info.className = "wm-home-identity-info";
+
+  const label = document.createElement("span");
+  label.className = "wm-home-identity-label";
+  label.textContent = "Identity:";
+
+  const status = document.createElement("span");
+  status.className = "wm-home-identity-status";
+  status.hidden = true;
+
+  info.append(label, status);
+
+  const actions = document.createElement("div");
+  actions.className = "wm-home-identity-actions";
+
+  const loginButton = document.createElement("button");
+  loginButton.type = "button";
+  loginButton.className = "wm-button";
+  loginButton.textContent = "Log In";
+  loginButton.addEventListener("click", () => {
+    openIdentityLoginDialog();
+  });
+
+  const manageButton = document.createElement("button");
+  manageButton.type = "button";
+  manageButton.className = "wm-link-button wm-home-identity-manage";
+  manageButton.textContent = "Manage";
+  manageButton.hidden = true;
+  manageButton.addEventListener("click", () => {
+    closeIdentityLoginDialog();
+    navigateToSettings();
+  });
+
+  actions.append(loginButton, manageButton);
+  card.append(info, actions);
+
+  const updateBanner = () => {
+    const { npub } = state.identity;
+    if (npub) {
+      const truncated = npub.length > 12 ? `${npub.slice(0, 12)}...` : npub;
+      status.textContent = truncated;
+      status.title = npub;
+      status.hidden = false;
+      manageButton.hidden = false;
+      loginButton.hidden = true;
+    } else {
+      status.textContent = "";
+      status.removeAttribute("title");
+      status.hidden = true;
+      manageButton.hidden = true;
+      loginButton.hidden = false;
+    }
+  };
+
+  const identityEventHandler = () => {
+    updateBanner();
+  };
+  const trackedEvents = ["wingman:identity-ui-state", ...IDENTITY_EVENT_NAMES];
+  trackedEvents.forEach((eventName) => {
+    window.addEventListener(eventName, identityEventHandler);
+  });
+
+  detachHomeIdentityBannerListener = () => {
+    trackedEvents.forEach((eventName) => {
+      window.removeEventListener(eventName, identityEventHandler);
+    });
+    detachHomeIdentityBannerListener = null;
+  };
+
+  updateBanner();
+
+  return card;
+};
+
 const renderHome = () => {
   const wrapper = document.createElement("div");
   wrapper.className = "wm-home";
+
+  wrapper.append(renderHomeIdentityBanner());
 
   if (!state.apps.initialized && !state.apps.loading) {
     void ensureAppsLoaded();
@@ -5118,6 +6358,36 @@ const renderHome = () => {
   const actions = document.createElement("div");
   actions.className = "wm-actions";
 
+  const filterContainer = document.createElement("div");
+  filterContainer.className = "wm-session-filter";
+  const filterLabel = document.createElement("label");
+  filterLabel.textContent = "Identity";
+  const filterSelect = document.createElement("select");
+  filterSelect.className = "wm-select";
+  buildSessionFilterOptions().forEach((option) => {
+    const opt = document.createElement("option");
+    opt.value = option.value;
+    opt.textContent = option.label;
+    if (option.value === state.sessionFilters.npub) {
+      opt.selected = true;
+    }
+    filterSelect.append(opt);
+  });
+  filterSelect.addEventListener("change", (event) => {
+    const target = event.target;
+    const value = target instanceof HTMLSelectElement && target.value ? target.value : "all";
+    state.sessionFilters.npub = value;
+    void fetchSessions().then(() => {
+      syncMenuTabs();
+      if (currentRoute === "home" || currentRoute === "live") {
+        render();
+      }
+    });
+  });
+  filterLabel.append(filterSelect);
+  filterContainer.append(filterLabel);
+  actions.append(filterContainer);
+
   const launchBtn = document.createElement("button");
   launchBtn.className = "wm-button";
   launchBtn.textContent = "Launch Agent Session";
@@ -5129,7 +6399,7 @@ const renderHome = () => {
 
   const thead = document.createElement("thead");
   thead.innerHTML =
-    "<tr><th>Name</th><th>Agent</th><th>Status</th><th>Port</th><th>PID</th><th>Started</th><th>Directory</th><th></th></tr>";
+    "<tr><th>Name</th><th>Agent</th><th>Identity</th><th>Status</th><th>Port</th><th>PID</th><th>Started</th><th>Directory</th><th></th></tr>";
   table.append(thead);
 
   const tbody = document.createElement("tbody");
@@ -5144,9 +6414,11 @@ const renderHome = () => {
     state.sessions.forEach((session) => {
       const row = document.createElement("tr");
       const displayName = getSessionDisplayName(session);
+      const identityLabel = session.npub && session.npub.length > 0 ? session.npub : "Anonymous";
       row.innerHTML = `
         <td>${escapeHtml(displayName)}</td>
         <td>${escapeHtml(session.agent)}</td>
+        <td class="identity-cell" title="${escapeHtml(identityLabel)}">${escapeHtml(identityLabel)}</td>
         <td>${escapeHtml(session.status)}</td>
         <td>${escapeHtml(session.port)}</td>
         <td>${session.pid ?? "-"}</td>
@@ -5219,6 +6491,7 @@ const renderHome = () => {
       };
 
       addDetail("Agent", session.agent);
+      addDetail("Identity", session.npub ?? "Anonymous");
       addDetail("Port", session.port ?? "-");
       addDetail("PID", session.pid ?? "-");
       addDetail("Started", new Date(session.startedAt).toLocaleTimeString());
@@ -5998,6 +7271,8 @@ const renderSettings = () => {
   pageTitle.textContent = "Settings";
   wrapper.append(pageTitle);
 
+  wrapper.append(renderIdentityPanel());
+
   const sections = [
     {
       title: "Wingman Settings",
@@ -6550,6 +7825,9 @@ const render = () => {
   } else {
     view = renderHome();
   }
+  if (currentRoute !== "home") {
+    detachHomeIdentityBannerListener?.();
+  }
   appRoot.append(view);
   renderFileEditorOverlay();
   renderWorktreeModal();
@@ -6625,6 +7903,19 @@ const finishPull = () => {
   }
 };
 
+function navigateToSettings({ skipMenuClose = false } = {}) {
+  if (!skipMenuClose) {
+    closeMenu();
+  }
+  closeIdentityLoginDialog();
+  currentRoute = "settings";
+  lastLoggedSessionId = null;
+  if (window.location.pathname !== SETTINGS_ROUTE) {
+    window.history.pushState({ route: "settings" }, "", SETTINGS_ROUTE);
+  }
+  render();
+}
+
 navLinks.forEach((link) => {
   link.addEventListener("click", (event) => {
     event.preventDefault();
@@ -6659,11 +7950,8 @@ navLinks.forEach((link) => {
         void loadFilesTree();
       }
     } else if (targetRoute === "settings") {
-      currentRoute = "settings";
-      lastLoggedSessionId = null;
-      if (window.location.pathname !== SETTINGS_ROUTE) {
-        window.history.pushState({ route: "settings" }, "", SETTINGS_ROUTE);
-      }
+      navigateToSettings({ skipMenuClose: true });
+      return;
     } else {
       currentRoute = "home";
       lastLoggedSessionId = null;
@@ -6700,6 +7988,22 @@ document.addEventListener("click", (event) => {
     const target = event.target;
     if (target instanceof Node && !menuToggle?.contains(target) && !menuPanel?.contains(target)) {
       closeMenu();
+    }
+  }
+
+  const clickTarget = event.target;
+  if (clickTarget instanceof HTMLElement) {
+    if (clickTarget.matches('[data-action="identity-logout"]')) {
+      if (!clickTarget.disabled) {
+        void handleIdentityLogout(event, identityDomEntryByNode.get(clickTarget) ?? null);
+      } else {
+        event.preventDefault();
+      }
+      return;
+    }
+    if (clickTarget.matches('[data-action="copy-active-npub"]')) {
+      void handleIdentityCopy(event, identityDomEntryByNode.get(clickTarget) ?? null);
+      return;
     }
   }
 });

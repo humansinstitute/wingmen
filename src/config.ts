@@ -1,3 +1,5 @@
+import { isAbsolute, normalize, resolve } from "node:path";
+
 export type AgentType = "codex" | "claude" | "goose" | "opencode" | "gemini";
 
 export interface AgentCommandContext {
@@ -20,6 +22,7 @@ export interface WingmanConfig {
   agentPortStart: number;
   agentPortMax: number;
   defaultWorkingDirectory: string;
+  allowedDirectories: string[];
   allowedOrigins: string;
   allowedHosts: string;
   tmuxBase: string;
@@ -43,6 +46,12 @@ const expandHomeDirectory = (input: string): string => {
   if (!input.startsWith("~")) return input;
   const home = Bun.env.HOME ?? "~";
   return input.replace("~", home);
+};
+
+const normaliseDirectory = (input: string, baseDirectory: string): string => {
+  const expanded = expandHomeDirectory(input);
+  const absolute = isAbsolute(expanded) ? expanded : resolve(baseDirectory, expanded);
+  return normalize(absolute);
 };
 
 const agentMode = (Bun.env.AGENT_MODE ?? "").trim().toLowerCase();
@@ -111,7 +120,22 @@ export const loadConfig = (): WingmanConfig => {
   const port = sanitizeInteger(Bun.env.PORT, DEFAULT_PORT);
   const agentPortStart = sanitizeInteger(Bun.env.AGENT_PORTS, DEFAULT_AGENT_PORTS);
   const agentPortMax = sanitizeInteger(Bun.env.AGENT_MAX, DEFAULT_AGENT_MAX);
-  const defaultWorkingDirectory = expandHomeDirectory(Bun.env.DIRECTORY_DEF ?? DEFAULT_DIRECTORY);
+  const defaultDirectoryInput = Bun.env.DIRECTORY_DEF ?? DEFAULT_DIRECTORY;
+  const defaultWorkingDirectory = normaliseDirectory(defaultDirectoryInput, process.cwd());
+  const allowedDirectoryInput = Bun.env.FOLDERACCESS;
+  const configuredAllowedDirectories = allowedDirectoryInput
+    ? allowedDirectoryInput
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0)
+        .map((value) => normaliseDirectory(value, defaultWorkingDirectory))
+    : [];
+  const allowedDirectories = Array.from(
+    new Set([
+      ...configuredAllowedDirectories,
+      defaultWorkingDirectory,
+    ]),
+  );
   const allowedOrigins = Bun.env.AGENTAPI_ALLOWED_ORIGINS ?? DEFAULT_ALLOWED_ORIGINS;
   const allowedHosts = Bun.env.AGENTAPI_ALLOWED_HOSTS ?? DEFAULT_ALLOWED_HOSTS;
 
@@ -120,6 +144,7 @@ export const loadConfig = (): WingmanConfig => {
     agentPortStart,
     agentPortMax,
     defaultWorkingDirectory,
+    allowedDirectories,
     allowedOrigins,
     allowedHosts,
     tmuxBase,
