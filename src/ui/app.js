@@ -50,6 +50,10 @@ const state = {
     loading: false,
     initialized: false,
     error: null,
+    git: new Map(),
+    gitLoading: new Map(),
+    gitErrors: new Map(),
+    gitCommandPending: new Map(),
   },
   system: {
     restart: {
@@ -91,13 +95,16 @@ const state = {
     showHidden: false,
     browserCollapsed: false,
     uploading: false,
-    gitCommandPending: false,
     worktreeModal: {
       open: false,
       submitting: false,
       error: null,
       branch: "",
       startPoint: "",
+      context: "files",
+      directory: null,
+      appId: null,
+      git: null,
     },
     transfer: {
       mode: null,
@@ -1872,16 +1879,18 @@ const moveFilesEntry = async (path, targetDirectory) => {
 };
 
 const getWorktreeGitInfo = () => {
+  const modal = state.files.worktreeModal;
+  if (modal.context === "app" && modal.git && typeof modal.git === "object") {
+    return modal.git;
+  }
   const git = state.files.git;
   if (!git || typeof git !== "object") return null;
   return git;
 };
 
-const canCreateWorktree = () => {
-  const git = getWorktreeGitInfo();
-  if (!git) return false;
-  return Boolean(git.isRepoRoot && git.hasGitMetadata);
-};
+const canCreateWorktreeForGit = (git) => Boolean(git?.isRepoRoot && git?.hasGitMetadata);
+
+const canCreateWorktree = () => canCreateWorktreeForGit(getWorktreeGitInfo());
 
 const resetWorktreeModalState = (defaults = {}) => {
   const modal = state.files.worktreeModal;
@@ -1892,9 +1901,13 @@ const resetWorktreeModalState = (defaults = {}) => {
 };
 
 const openWorktreeModal = () => {
+  const modal = state.files.worktreeModal;
+  modal.context = "files";
+  modal.directory = state.files.currentPath ?? state.files.git?.repoRoot ?? null;
+  modal.appId = null;
+  modal.git = null;
   if (!canCreateWorktree()) return;
   const git = getWorktreeGitInfo();
-  const modal = state.files.worktreeModal;
   resetWorktreeModalState({
     branch: "",
     startPoint: git?.currentBranch && git.currentBranch !== "HEAD" ? git.currentBranch : git?.headRef ?? "",
@@ -1908,14 +1921,22 @@ const closeWorktreeModal = () => {
   if (!modal.open) return;
   modal.open = false;
   resetWorktreeModalState();
+  modal.context = "files";
+  modal.directory = null;
+  modal.appId = null;
+  modal.git = null;
   renderWorktreeModal();
 };
 
 const requestCreateWorktree = async () => {
   const files = state.files;
+  const modal = files.worktreeModal;
   const git = getWorktreeGitInfo();
   if (!git) return;
-  const modal = files.worktreeModal;
+  const context = modal.context ?? "files";
+  const targetDirectory =
+    modal.directory ??
+    (context === "app" ? git.repoRoot ?? null : git.repoRoot ?? files.currentPath ?? null);
   const branch = modal.branch.trim();
   if (!branch) {
     modal.error = "Branch name is required";
@@ -1932,7 +1953,7 @@ const requestCreateWorktree = async () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        directory: git.repoRoot ?? files.currentPath,
+        directory: targetDirectory ?? git.repoRoot ?? files.currentPath,
         branch,
         startPoint: modal.startPoint.trim() || null,
       }),
@@ -1943,16 +1964,33 @@ const requestCreateWorktree = async () => {
       throw new Error(message);
     }
     const payload = await response.json().catch(() => ({}));
-    if (payload?.repository) {
-      files.git = payload.repository;
+    const nextRepository = payload?.repository ?? null;
+    if (context === "app" && modal.appId) {
+      if (nextRepository) {
+        state.apps.git.set(modal.appId, nextRepository);
+      }
+    } else if (nextRepository) {
+      files.git = nextRepository;
     } else {
       // Refresh to pick up latest git info when response lacks repository payload
-      void loadFilesTree(files.currentPath);
+      if (context === "app" && modal.appId) {
+        void refreshAppGitInfo(modal.appId);
+      } else {
+        void loadFilesTree(files.currentPath);
+      }
     }
+    const targetAppId = modal.appId;
     modal.open = false;
     resetWorktreeModalState();
     renderWorktreeModal();
-    await loadFilesTree(files.currentPath);
+    if (context === "app" && targetAppId) {
+      await refreshAppGitInfo(targetAppId);
+      if (currentRoute === "apps") {
+        render();
+      }
+    } else {
+      await loadFilesTree(files.currentPath);
+    }
   } catch (error) {
     modal.submitting = false;
     modal.error = error instanceof Error ? error.message : "Failed to create worktree";
@@ -4006,6 +4044,10 @@ const fetchConversation = async (sessionId) => {
 
 const fetchApps = async ({ tail = APP_LOG_PREVIEW_LINES } = {}) => {
   state.apps.loading = true;
+  state.apps.error = null;
+  const previousItems = new Map(
+    (Array.isArray(state.apps.items) ? state.apps.items : []).map((item) => [item?.id, item]),
+  );
   try {
     const response = await fetch(`/api/apps?tail=${encodeURIComponent(String(tail))}`);
     const payload = await response.json().catch(() => null);
@@ -4033,6 +4075,34 @@ const fetchApps = async ({ tail = APP_LOG_PREVIEW_LINES } = {}) => {
         logs,
         availableScripts,
       };
+    });
+    const activeIds = new Set(state.apps.items.map((item) => item?.id));
+    for (const key of Array.from(state.apps.git.keys())) {
+      if (!activeIds.has(key)) {
+        state.apps.git.delete(key);
+      }
+    }
+    for (const key of Array.from(state.apps.gitLoading.keys())) {
+      if (!activeIds.has(key)) {
+        state.apps.gitLoading.delete(key);
+      }
+    }
+    for (const key of Array.from(state.apps.gitErrors.keys())) {
+      if (!activeIds.has(key)) {
+        state.apps.gitErrors.delete(key);
+      }
+    }
+    for (const key of Array.from(state.apps.gitCommandPending.keys())) {
+      if (!activeIds.has(key)) {
+        state.apps.gitCommandPending.delete(key);
+      }
+    }
+    state.apps.items.forEach((item) => {
+      const previous = previousItems.get(item.id);
+      if (previous && previous.root !== item.root) {
+        state.apps.git.delete(item.id);
+        state.apps.gitErrors.delete(item.id);
+      }
     });
     state.apps.error = null;
   } catch (error) {
@@ -5450,6 +5520,11 @@ const renderWingmanCard = (app) => {
 
   card.append(statusInfo);
 
+  const gitSection = renderAppGitSection(app);
+  if (gitSection) {
+    card.append(gitSection);
+  }
+
   card.append(renderAppLogPreview(app.logs));
 
   const actions = document.createElement("div");
@@ -6611,13 +6686,90 @@ const promptUploadFile = () => {
   input.click();
 };
 
-const runGitCommand = async (action) => {
-  if (!action) return "cancelled";
-  const files = state.files;
-  if (files.gitCommandPending) return "cancelled";
+const getAppGitInfo = (appId) => {
+  if (!state.apps.git.has(appId)) {
+    return undefined;
+  }
+  return state.apps.git.get(appId) ?? null;
+};
 
+const getAppGitError = (appId) => state.apps.gitErrors.get(appId) ?? null;
+
+const isAppGitLoading = (appId) => state.apps.gitLoading.get(appId) === true;
+
+const isAppGitCommandPending = (appId) => state.apps.gitCommandPending.get(appId) === true;
+
+const fetchGitInfoForDirectory = async (directory) => {
+  if (!directory) {
+    throw new Error("Directory is required");
+  }
+  const url = new URL("/api/docs/tree", window.location.origin);
+  url.searchParams.set("path", directory);
+  const response = await fetch(url.toString(), { method: "GET" });
+  if (!response.ok) {
+    let message = response.statusText || "Failed to load git information";
+    try {
+      const payload = await response.json();
+      if (payload && typeof payload.error === "string" && payload.error.length > 0) {
+        message = payload.error;
+      }
+    } catch {
+      // ignore parse failure
+    }
+    throw new Error(message);
+  }
+  const data = await response.json().catch(() => ({}));
+  const git = data?.git ?? null;
+  if (git && typeof git === "object") {
+    return git;
+  }
+  return null;
+};
+
+const refreshAppGitInfo = async (appId, { root, force = false } = {}) => {
+  if (!force && isAppGitLoading(appId)) {
+    return;
+  }
+  const app = getAppById(appId);
+  const directory = root ?? app?.root ?? null;
+  if (!directory) {
+    state.apps.git.delete(appId);
+    state.apps.gitErrors.set(appId, "App root is not configured");
+    if (currentRoute === "apps") {
+      render();
+    }
+    return;
+  }
+  state.apps.gitLoading.set(appId, true);
+  state.apps.gitErrors.delete(appId);
+  try {
+    const git = await fetchGitInfoForDirectory(directory);
+    state.apps.git.set(appId, git);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to load git information";
+    state.apps.gitErrors.set(appId, message);
+  } finally {
+    state.apps.gitLoading.delete(appId);
+    if (currentRoute === "apps") {
+      render();
+    }
+  }
+};
+
+const ensureAppGitInfo = (app) => {
+  if (!app?.id || !app?.root) return;
+  if (state.apps.git.has(app.id) || isAppGitLoading(app.id)) {
+    return;
+  }
+  void refreshAppGitInfo(app.id, { root: app.root });
+};
+
+const runAppGitCommand = async (app, action) => {
+  if (!app || !app.id || !action) return "cancelled";
+  if (isAppGitCommandPending(app.id)) return "cancelled";
+
+  const gitInfo = getAppGitInfo(app.id);
   const requiresRepository = action !== "init";
-  const gitInfo = files.git;
   const inRepository = Boolean(gitInfo?.isRepository);
 
   if (requiresRepository && !inRepository) {
@@ -6625,12 +6777,14 @@ const runGitCommand = async (action) => {
     return "cancelled";
   }
 
-  const directory =
-    action === "init" && !inRepository ? files.currentPath ?? gitInfo?.repoRoot ?? null : gitInfo?.repoRoot ?? files.currentPath ?? null;
-
+  let directory = app.root ?? "";
   if (!directory) {
-    window.alert("Select a directory before running git commands.");
+    window.alert("App root is not configured.");
     return "cancelled";
+  }
+
+  if (action !== "init" || inRepository) {
+    directory = gitInfo?.repoRoot ?? directory;
   }
 
   const payload = { action, directory };
@@ -6686,8 +6840,8 @@ const runGitCommand = async (action) => {
     payload.branch = branch;
   }
 
-  files.gitCommandPending = true;
-  if (currentRoute === "files") {
+  state.apps.gitCommandPending.set(app.id, true);
+  if (currentRoute === "apps") {
     render();
   }
 
@@ -6716,22 +6870,221 @@ const runGitCommand = async (action) => {
     const output = [stdout, stderr].filter((part) => part.length > 0).join("\n");
     window.alert(output || "Git command completed successfully.");
 
-    if (files.currentPath) {
-      await loadFilesTree(files.currentPath);
-    } else {
-      await loadFilesTree();
-    }
+    await refreshAppGitInfo(app.id, { root: app.root, force: true });
     return "success";
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     window.alert(message);
     return "error";
   } finally {
-    files.gitCommandPending = false;
-    if (currentRoute === "files") {
+    state.apps.gitCommandPending.delete(app.id);
+    if (currentRoute === "apps") {
       render();
     }
   }
+};
+
+const openAppWorktreeModal = (appId) => {
+  const app = getAppById(appId);
+  if (!app) return;
+  const git = getAppGitInfo(app.id);
+  if (!canCreateWorktreeForGit(git)) {
+    window.alert("Worktrees can only be created from the repository root with a .git directory.");
+    return;
+  }
+  const modal = state.files.worktreeModal;
+  modal.context = "app";
+  modal.directory = git?.repoRoot ?? app.root ?? null;
+  modal.appId = app.id;
+  modal.git = git;
+  resetWorktreeModalState({
+    branch: "",
+    startPoint: git?.currentBranch && git.currentBranch !== "HEAD" ? git.currentBranch : git?.headRef ?? "",
+  });
+  modal.open = true;
+  renderWorktreeModal();
+};
+
+const renderAppGitSection = (app) => {
+  if (!app?.id || !app?.root) {
+    return null;
+  }
+
+  ensureAppGitInfo(app);
+
+  const loading = isAppGitLoading(app.id);
+  const commandPending = isAppGitCommandPending(app.id);
+  const gitInfo = getAppGitInfo(app.id);
+  const gitError = getAppGitError(app.id);
+
+  const container = document.createElement("div");
+  container.className = "wm-app-git";
+
+  const header = document.createElement("div");
+  header.className = "wm-app-git__header";
+  const title = document.createElement("h4");
+  title.textContent = "Git";
+  header.append(title);
+
+  const refreshButton = document.createElement("button");
+  refreshButton.type = "button";
+  refreshButton.className = "wm-button secondary wm-button-icon";
+  setIconButton(refreshButton, "refresh", "Refresh git status");
+  if (loading) {
+    refreshButton.dataset.loading = "true";
+  }
+  refreshButton.disabled = loading || commandPending;
+  refreshButton.addEventListener("click", () => {
+    if (isAppGitLoading(app.id)) return;
+    void refreshAppGitInfo(app.id, { root: app.root, force: true });
+  });
+  header.append(refreshButton);
+
+  container.append(header);
+
+  const body = document.createElement("div");
+  body.className = "wm-app-git__body";
+  container.append(body);
+
+  if (loading && gitInfo === undefined && !gitError) {
+    const status = document.createElement("p");
+    status.className = "wm-app-git__status";
+    status.textContent = "Checking repository…";
+    body.append(status);
+    return container;
+  }
+
+  if (gitError) {
+    const error = document.createElement("p");
+    error.className = "wm-app-git__error";
+    error.textContent = gitError;
+    body.append(error);
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "wm-button secondary";
+    retry.textContent = "Retry";
+    retry.disabled = loading;
+    retry.addEventListener("click", () => {
+      if (isAppGitLoading(app.id)) return;
+      void refreshAppGitInfo(app.id, { root: app.root, force: true });
+    });
+    body.append(retry);
+    return container;
+  }
+
+  const summary = document.createElement("div");
+  summary.className = "wm-app-git__summary";
+  if (gitInfo) {
+    const branchName =
+      gitInfo.currentBranch && gitInfo.currentBranch !== "HEAD"
+        ? gitInfo.currentBranch
+        : gitInfo.headRef ?? "HEAD";
+    const branchLine = document.createElement("p");
+    branchLine.textContent = `Branch: ${branchName}`;
+    summary.append(branchLine);
+
+    if (gitInfo.repoRoot) {
+      const rootLine = document.createElement("p");
+      rootLine.textContent = `Repo root: ${gitInfo.repoRoot}`;
+      rootLine.title = gitInfo.repoRoot;
+      summary.append(rootLine);
+    }
+
+    if (loading) {
+      const refreshLine = document.createElement("p");
+      refreshLine.className = "wm-app-git__status";
+      refreshLine.textContent = "Refreshing…";
+      summary.append(refreshLine);
+    }
+  } else {
+    const status = document.createElement("p");
+    status.className = "wm-app-git__status";
+    status.textContent = "Git repository not detected. Use git init to create one.";
+    summary.append(status);
+  }
+  body.append(summary);
+
+  const controls = document.createElement("div");
+  controls.className = "wm-app-git__controls";
+  body.append(controls);
+
+  const gitSelect = document.createElement("select");
+  gitSelect.className = "wm-select";
+  gitSelect.setAttribute("aria-label", "Git commands");
+  const placeholder = document.createElement("option");
+  placeholder.value = "";
+  placeholder.textContent = "Git…";
+  gitSelect.append(placeholder);
+  const gitOptions = [
+    { value: "addAll", label: "git add .", requiresRepo: true },
+    { value: "commit", label: "git commit -m", requiresRepo: true },
+    { value: "push", label: "git push", requiresRepo: true },
+    { value: "pushUpstream", label: "git push -u origin <branch>", requiresRepo: true },
+    { value: "init", label: "git init", requiresRepo: false },
+  ];
+  const repoReady = Boolean(gitInfo?.isRepository);
+  gitOptions.forEach((optionDef) => {
+    const option = document.createElement("option");
+    option.value = optionDef.value;
+    option.textContent = optionDef.label;
+    if (optionDef.requiresRepo && !repoReady) {
+      option.disabled = true;
+    }
+    gitSelect.append(option);
+  });
+
+  controls.append(gitSelect);
+
+  const runButton = document.createElement("button");
+  runButton.type = "button";
+  runButton.className = "wm-button secondary";
+  const syncRunButtonState = () => {
+    const pendingNow = isAppGitCommandPending(app.id);
+    const loadingNow = isAppGitLoading(app.id);
+    gitSelect.disabled = pendingNow || loadingNow;
+    runButton.disabled = pendingNow || loadingNow || gitSelect.value === "";
+    if (pendingNow) {
+      runButton.dataset.loading = "true";
+      runButton.textContent = "Running…";
+    } else {
+      delete runButton.dataset.loading;
+      runButton.textContent = "Run";
+    }
+  };
+  syncRunButtonState();
+  gitSelect.addEventListener("change", () => {
+    syncRunButtonState();
+  });
+  runButton.addEventListener("click", async () => {
+    const action = gitSelect.value;
+    if (!action) return;
+    const outcome = await runAppGitCommand(app, action);
+    if (outcome !== "cancelled") {
+      gitSelect.value = "";
+    }
+    syncRunButtonState();
+  });
+  controls.append(runButton);
+
+  if (canCreateWorktreeForGit(gitInfo)) {
+    const modal = state.files.worktreeModal;
+    const modalBusy = modal.submitting && modal.context === "app";
+    const worktreeButton = document.createElement("button");
+    worktreeButton.type = "button";
+    worktreeButton.className = "wm-button wm-button-icon";
+    setIconButton(worktreeButton, "branchPlus", "Create new worktree");
+    worktreeButton.disabled = commandPending || loading || modalBusy;
+    worktreeButton.addEventListener("click", () => {
+      if (commandPending || loading) return;
+      openAppWorktreeModal(app.id);
+    });
+    if (modalBusy && modal.appId === app.id) {
+      worktreeButton.dataset.loading = "true";
+    }
+    controls.append(worktreeButton);
+  }
+
+  return container;
 };
 
 const renderFiles = () => {
@@ -6853,62 +7206,6 @@ const renderFiles = () => {
     promptUploadFile();
   });
 
-  const gitWrapper = document.createElement("div");
-  gitWrapper.className = "wm-files-browser__git";
-  const gitSelect = document.createElement("select");
-  gitSelect.className = "wm-select";
-  gitSelect.setAttribute("aria-label", "Git commands");
-  const gitPlaceholder = document.createElement("option");
-  gitPlaceholder.value = "";
-  gitPlaceholder.textContent = "Git…";
-  gitSelect.append(gitPlaceholder);
-  const gitOptions = [
-    { value: "addAll", label: "git add .", requiresRepo: true },
-    { value: "commit", label: "git commit -m", requiresRepo: true },
-    { value: "push", label: "git push", requiresRepo: true },
-    { value: "pushUpstream", label: "git push -u origin <branch>", requiresRepo: true },
-    { value: "init", label: "git init", requiresRepo: false },
-  ];
-  const repoReady = Boolean(files.git?.isRepository);
-  gitOptions.forEach((optionDef) => {
-    const option = document.createElement("option");
-    option.value = optionDef.value;
-    option.textContent = optionDef.label;
-    if (optionDef.requiresRepo && !repoReady) {
-      option.disabled = true;
-    }
-    gitSelect.append(option);
-  });
-  const gitRunButton = document.createElement("button");
-  gitRunButton.type = "button";
-  gitRunButton.className = "wm-button secondary";
-  const updateGitControlsState = () => {
-    const disabled = files.loading || files.gitCommandPending;
-    gitSelect.disabled = disabled;
-    gitRunButton.disabled = disabled || gitSelect.value === "";
-    if (files.gitCommandPending) {
-      gitRunButton.dataset.loading = "true";
-      gitRunButton.textContent = "Running…";
-    } else {
-      delete gitRunButton.dataset.loading;
-      gitRunButton.textContent = "Run";
-    }
-  };
-  updateGitControlsState();
-  gitSelect.addEventListener("change", () => {
-    updateGitControlsState();
-  });
-  gitRunButton.addEventListener("click", async () => {
-    const action = gitSelect.value;
-    if (!action) return;
-    const outcome = await runGitCommand(action);
-    if (outcome !== "cancelled") {
-      gitSelect.value = "";
-    }
-    updateGitControlsState();
-  });
-  gitWrapper.append(gitSelect, gitRunButton);
-
   controls.append(
     upButton,
     refreshButton,
@@ -6916,24 +7213,7 @@ const renderFiles = () => {
     newFolderButton,
     newFileButton,
     uploadButton,
-    gitWrapper,
   );
-
-  if (canCreateWorktree()) {
-    const worktreeButton = document.createElement("button");
-    worktreeButton.type = "button";
-    worktreeButton.className = "wm-button wm-button-icon";
-    setIconButton(worktreeButton, "branchPlus", "Create new worktree");
-    worktreeButton.disabled = files.loading || state.files.worktreeModal.submitting;
-    worktreeButton.addEventListener("click", () => {
-      if (files.loading) return;
-      openWorktreeModal();
-    });
-    if (state.files.worktreeModal.submitting) {
-      worktreeButton.dataset.loading = "true";
-    }
-    controls.append(worktreeButton);
-  }
 
   browserHeader.append(headerButton, controls);
 

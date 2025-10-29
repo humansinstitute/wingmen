@@ -674,6 +674,71 @@ body[data-menu-open="true"] .wm-menu-panel {
   margin: 0;
 }
 
+.wm-app-git {
+  border-top: 1px solid var(--border-primary);
+  padding-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.wm-app-git__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.wm-app-git__header h4 {
+  margin: 0;
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+  letter-spacing: -0.01em;
+}
+
+.wm-app-git__body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.wm-app-git__summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+}
+
+.wm-app-git__summary p {
+  margin: 0;
+}
+
+.wm-app-git__status {
+  font-size: 0.85rem;
+  color: var(--text-tertiary);
+}
+
+.wm-app-git__error {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #f87171;
+}
+
+.wm-app-git__controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.wm-app-git__controls .wm-select {
+  min-width: 0;
+  width: auto;
+  max-width: 12rem;
+  white-space: nowrap;
+}
+
 .wm-app-status-error {
   color: #f87171;
   font-weight: 600;
@@ -2703,15 +2768,6 @@ dialog button[value="cancel"] {
   justify-content: center;
 }
 
-.wm-files-browser__git {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.35rem;
-  flex-basis: auto;
-  justify-content: flex-start;
-  margin-top: 0.15rem;
-}
-
 .wm-select {
   appearance: none;
   -webkit-appearance: none;
@@ -2733,13 +2789,6 @@ dialog button[value="cancel"] {
 .wm-select:disabled {
   opacity: 0.6;
   cursor: not-allowed;
-}
-
-.wm-files-browser__git .wm-select {
-  min-width: 0;
-  width: auto;
-  max-width: 12rem;
-  white-space: nowrap;
 }
 
 .wm-files-browser[data-collapsed="true"] .wm-files-browser__list {
