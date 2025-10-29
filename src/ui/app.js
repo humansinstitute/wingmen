@@ -46,7 +46,6 @@ const state = {
   logContainers: new Map(), // sessionId -> DOM element
   lastMessageCount: new Map(), // sessionId -> number of messages
   lastLogLength: new Map(), // sessionId -> length of logs
-  sessionStatusOverrides: new Map(),
   apps: {
     items: [],
     loading: false,
@@ -148,16 +147,6 @@ const state = {
     expiresAt: null,
     authenticated: false,
   },
-};
-
-const applySessionStatusOverride = (sessionId, override) => {
-  if (!sessionId) return;
-  if (override) {
-    state.sessionStatusOverrides.set(sessionId, override);
-  } else {
-    state.sessionStatusOverrides.delete(sessionId);
-  }
-  updateSessionStatusIndicator(sessionId);
 };
 
 try {
@@ -2611,26 +2600,22 @@ const ACTIVE_SESSION_STATUSES = new Set(["starting", "running"]);
 const isSessionActive = (session) => ACTIVE_SESSION_STATUSES.has(session?.status);
 const getActiveSessions = () => state.sessions.filter((session) => isSessionActive(session));
 
-const deriveSessionStatusInfoFromSession = (session) => {
+const deriveSessionStatusInfo = (session) => {
   const agentStatusRaw =
     session && typeof session.agentStatus === "string" ? session.agentStatus.toLowerCase() : "";
   const fallbackStatus =
     session && typeof session.status === "string" ? session.status.toLowerCase() : "";
   const status = agentStatusRaw || fallbackStatus;
 
-  if (!session) {
-    return { label: "Stable", state: "stable", display: "—" };
-  }
-
   switch (status) {
     case "working":
     case "running":
     case "busy":
-      return { label: "Working…", state: "working", display: "•" };
+      return { label: "Working…", state: "working" };
     case "stable":
     case "idle":
     case "ready":
-      return { label: "Stable", state: "stable", display: "—" };
+      return { label: "Stable", state: "stable" };
     case "starting":
       return { label: "Starting", state: "starting" };
     case "error":
@@ -2646,30 +2631,12 @@ const deriveSessionStatusInfoFromSession = (session) => {
     case "unreachable":
     case "timeout":
     case "":
-      return { label: "Stable", state: "stable", display: "—" };
+      return { label: "Unknown", state: "unknown" };
     default: {
       const capitalised = status.charAt(0).toUpperCase() + status.slice(1);
       return { label: capitalised, state: "unknown" };
     }
   }
-};
-
-const deriveSessionStatusInfo = (sessionId) => {
-  const override = state.sessionStatusOverrides.get(sessionId);
-  const session = getSessionById(sessionId);
-  const baseInfo = deriveSessionStatusInfoFromSession(session);
-
-  if (override === "working") {
-    return { label: "Working…", state: "working", display: "•" };
-  }
-  if (override === "stable") {
-    if (baseInfo.state === "error" || baseInfo.state === "stopped" || baseInfo.state === "starting") {
-      return baseInfo;
-    }
-    return { label: "Stable", state: "stable", display: "—" };
-  }
-
-  return baseInfo;
 };
 
 const updateSessionStatusIndicator = (sessionId) => {
@@ -2681,17 +2648,11 @@ const updateSessionStatusIndicator = (sessionId) => {
     return;
   }
 
-  const info = deriveSessionStatusInfo(sessionId);
+  const info = deriveSessionStatusInfo(getSessionById(sessionId));
   const title =
     info.state === "unknown" ? "Agent status not available" : `Agent status: ${info.label}`;
   indicator.dataset.state = info.state;
-  if (info.display) {
-    indicator.dataset.variant = "symbol";
-    indicator.textContent = info.display;
-  } else {
-    delete indicator.dataset.variant;
-    indicator.textContent = info.label;
-  }
+  indicator.textContent = info.state === "working" || info.state === "stable" ? "" : info.label;
   indicator.title = title;
   indicator.setAttribute("aria-label", title);
 };
@@ -4083,9 +4044,6 @@ const fetchSessions = async () => {
   for (const key of Array.from(state.sessionStatusIndicators.keys())) {
     if (!sessionIds.has(key)) state.sessionStatusIndicators.delete(key);
   }
-  for (const key of Array.from(state.sessionStatusOverrides.keys())) {
-    if (!sessionIds.has(key)) state.sessionStatusOverrides.delete(key);
-  }
   const routeSessionId = getSessionIdFromPath(window.location.pathname);
   const allowHistoryUpdate = currentRoute === "live" && !routeSessionId;
   const redirectHome = applyRouteSessionFromPath({ allowHistoryUpdate });
@@ -4636,7 +4594,6 @@ const sendMessage = async (sessionId, content) => {
     return;
   }
 
-  applySessionStatusOverride(sessionId, "working");
   try {
     const response = await fetch(`/api/sessions/${sessionId}/messages`, {
       method: "POST",
@@ -4672,8 +4629,6 @@ const sendMessage = async (sessionId, content) => {
   } catch (error) {
     console.error("Failed to send agent message", error);
     window.alert("Failed to send message to agent. Check console for details.");
-  } finally {
-    applySessionStatusOverride(sessionId, "stable");
   }
 };
 
@@ -8368,11 +8323,7 @@ const renderComposer = (sessionId) => {
   buttonGroup.append(statusIndicator, commandWrapper, submit);
 
   state.sessionStatusIndicators.set(sessionId, statusIndicator);
-  if (!state.sessionStatusOverrides.has(sessionId)) {
-    applySessionStatusOverride(sessionId, "stable");
-  } else {
-    updateSessionStatusIndicator(sessionId);
-  }
+  updateSessionStatusIndicator(sessionId);
 
   composer.append(fileInput, attachmentInput, textarea, buttonGroup);
   composerShell.append(composer);
