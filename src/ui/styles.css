@@ -77,6 +77,8 @@ body {
   display: flex;
   align-items: center;
   gap: 1rem;
+  color: inherit;
+  text-decoration: none;
 }
 
 .wm-brand h1 {
