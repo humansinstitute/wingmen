@@ -271,6 +271,10 @@ function createAdminUsersState() {
     initialized: false,
     error: null,
     pending: new Set(),
+    filters: {
+      onboarded: "all",
+      query: "",
+    },
   };
 }
 
@@ -2725,7 +2729,9 @@ const getSessionIdFromPath = (pathname) => {
 
 const restrictedRoutes = new Set(["live", "apps", "files"]);
 
-const hasWorkspaceAccess = () => state.identity.isAdmin || state.identity.onboarded;
+function hasWorkspaceAccess() {
+  return state.identity.isAdmin || state.identity.onboarded;
+}
 
 const redirectToHome = () => {
   currentRoute = "home";
@@ -2743,14 +2749,14 @@ const enforceRouteAccess = () => {
   return false;
 };
 
-const stopOnboardingPolling = () => {
+function stopOnboardingPolling() {
   if (onboardingPollIntervalId !== null) {
     clearInterval(onboardingPollIntervalId);
     onboardingPollIntervalId = null;
   }
-};
+}
 
-const startOnboardingPolling = () => {
+function startOnboardingPolling() {
   stopOnboardingPolling();
   if (hasWorkspaceAccess() || !state.identity.authenticated) {
     return;
@@ -2770,7 +2776,7 @@ const startOnboardingPolling = () => {
   };
   void poll();
   onboardingPollIntervalId = window.setInterval(poll, 5000);
-};
+}
 
 const enforceRouteAccessAndRender = () => {
   const redirected = enforceRouteAccess();
@@ -7959,6 +7965,44 @@ function renderAdminUsersPanel() {
   description.textContent = "Review registered identities and mark onboarding completion.";
   card.append(description);
 
+  const filters = state.adminUsers.filters ?? (state.adminUsers.filters = { onboarded: "all", query: "" });
+
+  const filterBar = document.createElement("div");
+  filterBar.className = "wm-admin-users__filters";
+
+  const onboardFilter = document.createElement("select");
+  onboardFilter.className = "wm-admin-users__filter-select";
+  [
+    { value: "all", label: "All users" },
+    { value: "yes", label: "Onboarded" },
+    { value: "no", label: "Not onboarded" },
+  ].forEach((option) => {
+    const node = document.createElement("option");
+    node.value = option.value;
+    node.textContent = option.label;
+    if (filters.onboarded === option.value) {
+      node.selected = true;
+    }
+    onboardFilter.append(node);
+  });
+  onboardFilter.addEventListener("change", () => {
+    state.adminUsers.filters.onboarded = onboardFilter.value;
+    render();
+  });
+
+  const searchInput = document.createElement("input");
+  searchInput.type = "search";
+  searchInput.className = "wm-admin-users__filter-search";
+  searchInput.placeholder = "Search alias…";
+  searchInput.value = filters.query ?? "";
+  searchInput.addEventListener("input", () => {
+    state.adminUsers.filters.query = searchInput.value;
+    render();
+  });
+
+  filterBar.append(onboardFilter, searchInput);
+  card.append(filterBar);
+
   if (state.adminUsers.loading && !state.adminUsers.initialized) {
     const loading = document.createElement("p");
     loading.className = "wm-admin-users__empty";
@@ -7988,10 +8032,24 @@ function renderAdminUsersPanel() {
   }
 
   const users = Array.isArray(state.adminUsers.items) ? state.adminUsers.items : [];
-  if (users.length === 0) {
+
+  const normalizedQuery = (filters.query ?? "").trim().toLowerCase();
+  const filteredUsers = users.filter((user) => {
+    if (!user || typeof user !== "object") return false;
+    const onboardedMatch =
+      filters.onboarded === "all" ||
+      (filters.onboarded === "yes" ? Boolean(user.onboarded) : !Boolean(user.onboarded));
+    if (!onboardedMatch) return false;
+    if (!normalizedQuery) return true;
+    const alias = typeof user.alias === "string" ? user.alias.toLowerCase() : "";
+    const npub = typeof user.npub === "string" ? user.npub.toLowerCase() : "";
+    return alias.includes(normalizedQuery) || npub.includes(normalizedQuery);
+  });
+
+  if (filteredUsers.length === 0) {
     const empty = document.createElement("p");
     empty.className = "wm-admin-users__empty";
-    empty.textContent = "No registered users yet.";
+    empty.textContent = users.length === 0 ? "No registered users yet." : "No users match the current filters.";
     card.append(empty);
     return card;
   }
@@ -7999,7 +8057,7 @@ function renderAdminUsersPanel() {
   const list = document.createElement("div");
   list.className = "wm-admin-users__list";
 
-  users.forEach((user) => {
+  filteredUsers.forEach((user) => {
     if (!user || typeof user !== "object") return;
     const row = document.createElement("div");
     row.className = "wm-admin-users__item";
