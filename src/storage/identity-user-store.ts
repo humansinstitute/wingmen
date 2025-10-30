@@ -172,6 +172,17 @@ class IdentityUserStore {
     return this.getOrThrow(normalized);
   }
 
+  getByNormalized(normalizedNpub: string): IdentityUserRecord | null {
+    if (!normalizedNpub) return null;
+    return this.get(normalizedNpub);
+  }
+
+  getByNpub(npub: string): IdentityUserRecord | null {
+    const normalized = normaliseNpub(npub);
+    if (!normalized) return null;
+    return this.get(normalized);
+  }
+
   private get(normalizedNpub: string): IdentityUserRecord | null {
     const statement = this.db.prepare<IdentityUserRow, IdentityUserRow>(
       `SELECT

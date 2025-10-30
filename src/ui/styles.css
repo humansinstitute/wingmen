@@ -2683,6 +2683,20 @@ dialog textarea {
   color: var(--text-tertiary);
 }
 
+.wm-home-onboarding {
+  text-align: center;
+  padding: 2.5rem 2rem;
+}
+
+.wm-home-onboarding h2 {
+  margin-bottom: 0.75rem;
+}
+
+.wm-home-onboarding p {
+  margin: 0;
+  color: var(--text-tertiary);
+}
+
 @media (min-width: 640px) {
   .working-directory-actions .wm-button {
     flex: 0 0 auto;

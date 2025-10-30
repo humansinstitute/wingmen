@@ -3170,6 +3170,34 @@ registerAccessRule(AccessActions.DeepDiveAccess, requireAdminAccess());
 registerAccessRule(AccessActions.SystemManage, requireAdminAccess());
 registerAccessRule(AccessActions.AdminUsers, requireAdminAccess());
 
+const getIdentityUserRecord = (authContext: RequestAuthContext) => {
+  const normalized = normaliseNpub(authContext.npub ?? null);
+  if (!normalized) return null;
+  try {
+    return identityUserStore.getByNormalized(normalized);
+  } catch (error) {
+    console.warn(`[admin] failed to load identity record for ${normalized}:`, error);
+    return null;
+  }
+};
+
+const isOnboardedContext = (authContext: RequestAuthContext): boolean => {
+  if (isAdminContext(authContext)) {
+    return true;
+  }
+  const record = getIdentityUserRecord(authContext);
+  return Boolean(record && record.roles.includes("onboard"));
+};
+
+const requireOnboardedAccess = (): AccessRule => {
+  return (context) => (isOnboardedContext(context.auth) ? allow() : deny("onboarding-required", 403));
+};
+
+registerAccessRule(AccessActions.SessionsManage, requireOnboardedAccess());
+registerAccessRule(AccessActions.FilesRead, requireOnboardedAccess());
+registerAccessRule(AccessActions.FilesWrite, requireOnboardedAccess());
+registerAccessRule(AccessActions.AppsManage, requireOnboardedAccess());
+
 const accessDeniedJson = (decision: AccessDecision): Response => {
   const headers = new Headers({
     "cache-control": "no-store",
@@ -3771,6 +3799,10 @@ const handleApi = async (
   }
 
   if (pathname === "/api/config" && method === "GET") {
+    const identityRecord = getIdentityUserRecord(authContext);
+    const identityRoles = identityRecord?.roles ?? [];
+    const onboarded = isOnboardedContext(authContext);
+    const alias = identityRecord?.alias ?? (authContext.npub ? generateIdentityAlias(authContext.npub) : null);
     return Response.json({
       port: config.port,
       agentPortStart: config.agentPortStart,
@@ -3778,6 +3810,13 @@ const handleApi = async (
       defaultDirectory: workspaceScope.defaultDirectory,
       allowedDirectories: workspaceScope.allowedDirectories,
       adminNpub,
+      identity: {
+        npub: authContext.npub ?? null,
+        alias,
+        roles: identityRoles,
+        onboarded,
+        isAdmin: isAdminContext(authContext),
+      },
       agents: Object.entries(config.agents).map(([key, definition]) => ({
         id: key,
         label: definition.label,

@@ -141,6 +141,8 @@ const state = {
     authenticated: false,
     alias: null,
     isAdmin: false,
+    roles: [],
+    onboarded: false,
   },
 };
 
@@ -394,6 +396,8 @@ const persistIdentityState = (identity) => {
         method: identity.method,
         expiresAt: identity.expiresAt ?? null,
         alias: identity.alias ?? null,
+        roles: Array.isArray(identity.roles) ? identity.roles : [],
+        onboarded: Boolean(identity.onboarded),
       };
       window.localStorage.setItem(IDENTITY_STORAGE_KEY, JSON.stringify(payload));
     } else {
@@ -487,6 +491,8 @@ const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
     authenticated: current.authenticated,
     alias: current.alias,
     isAdmin: current.isAdmin,
+    roles: Array.isArray(current.roles) ? [...current.roles] : [],
+    onboarded: Boolean(current.onboarded),
   };
   const wasAdmin = current.isAdmin;
 
@@ -523,12 +529,6 @@ const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
     next.expiresAt = timestamp;
   }
 
-  if (!next.npub) {
-    next.method = "none";
-    next.expiresAt = null;
-    next.alias = null;
-  }
-
   const configuredAdminNpub = getConfiguredAdminNpub();
   const normalizedNextNpub = normaliseNpubValue(next.npub);
   next.isAdmin = Boolean(configuredAdminNpub && normalizedNextNpub && normalizedNextNpub === configuredAdminNpub);
@@ -541,7 +541,38 @@ const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
     }
   }
 
+  if (Array.isArray(partial.roles)) {
+    next.roles = Array.from(new Set(partial.roles.filter((role) => typeof role === "string"))).sort();
+  }
+
+  if ("onboarded" in partial) {
+    next.onboarded = Boolean(partial.onboarded);
+  }
+
   next.authenticated = Boolean(next.npub);
+
+  if (!next.authenticated) {
+    next.method = "none";
+    next.expiresAt = null;
+    next.alias = null;
+    next.roles = [];
+    next.onboarded = false;
+  }
+
+  if (next.isAdmin) {
+    next.onboarded = true;
+  }
+
+  const rolesChanged = (() => {
+    const currentRoles = Array.isArray(current.roles) ? current.roles : [];
+    if (next.roles.length !== currentRoles.length) return true;
+    for (let index = 0; index < next.roles.length; index += 1) {
+      if (next.roles[index] !== currentRoles[index]) {
+        return true;
+      }
+    }
+    return false;
+  })();
 
   const changed =
     next.method !== current.method ||
@@ -549,7 +580,9 @@ const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
     next.expiresAt !== current.expiresAt ||
     next.authenticated !== current.authenticated ||
     next.isAdmin !== current.isAdmin ||
-    next.alias !== current.alias;
+    next.alias !== current.alias ||
+    next.onboarded !== current.onboarded ||
+    rolesChanged;
 
   if (!changed) {
     return current;
@@ -566,6 +599,12 @@ const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
   }
 
   syncIdentityDisplay();
+
+  if (typeof renderFn === "function") {
+    enforceRouteAccessAndRender();
+  } else {
+    enforceRouteAccess();
+  }
 
   if (emit && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
     try {
@@ -904,6 +943,12 @@ const handleIdentityEventPayload = (payload) => {
   }
   if (typeof payload.method === "string") {
     next.method = payload.method;
+  }
+  if (Array.isArray(payload.roles)) {
+    next.roles = payload.roles;
+  }
+  if ("onboarded" in payload) {
+    next.onboarded = Boolean(payload.onboarded);
   }
   if ("expiresAt" in payload || "sessionExpiresAt" in payload || "expiry" in payload) {
     const timestamp = toFiniteTimestamp(
@@ -1718,6 +1763,15 @@ const loadFilesTree = async (path) => {
       url.searchParams.set("showHidden", "1");
     }
     const response = await fetch(url.toString(), { method: "GET" });
+    if (response.status === 403) {
+      files.loading = false;
+      files.entries = [];
+      files.error = "Awaiting onboarding approval from an administrator.";
+      files.git = null;
+      updateIdentityState({ onboarded: false }, { persist: true, emit: true });
+      enforceRouteAccessAndRender();
+      return;
+    }
     if (!response.ok) {
       let message = response.statusText || "Failed to load directory";
       try {
@@ -1783,6 +1837,13 @@ const loadFilesPreview = async (path) => {
     const url = new URL("/api/docs/file", window.location.origin);
     url.searchParams.set("path", path);
     const response = await fetch(url.toString(), { method: "GET" });
+    if (response.status === 403) {
+      files.previewLoading = false;
+      files.previewError = "Awaiting onboarding approval from an administrator.";
+      updateIdentityState({ onboarded: false }, { persist: true, emit: true });
+      enforceRouteAccessAndRender();
+      return;
+    }
     if (!response.ok) {
       let message = response.statusText || "Failed to load file";
       try {
@@ -2650,6 +2711,35 @@ const getSessionIdFromPath = (pathname) => {
   return segments[0] ?? null;
 };
 
+const restrictedRoutes = new Set(["live", "apps", "files"]);
+
+const hasWorkspaceAccess = () => state.identity.isAdmin || state.identity.onboarded;
+
+const redirectToHome = () => {
+  currentRoute = "home";
+  lastLoggedSessionId = null;
+  if (window.location.pathname !== "/home") {
+    window.history.replaceState({ route: "home" }, "", "/home");
+  }
+  return true;
+};
+
+const enforceRouteAccess = () => {
+  if (!hasWorkspaceAccess() && restrictedRoutes.has(currentRoute)) {
+    return redirectToHome();
+  }
+  return false;
+};
+
+const enforceRouteAccessAndRender = () => {
+  const redirected = enforceRouteAccess();
+  if (redirected && typeof renderFn === "function") {
+    renderFn();
+    return true;
+  }
+  return redirected;
+};
+
 let currentRoute = getRouteFromPath(window.location.pathname);
 if (!state.identity.authenticated && currentRoute !== "home") {
   currentRoute = "home";
@@ -2657,10 +2747,14 @@ if (!state.identity.authenticated && currentRoute !== "home") {
     window.history.replaceState({ route: "home" }, "", "/home");
   }
 }
+if (restrictedRoutes.has(currentRoute) && !hasWorkspaceAccess()) {
+  redirectToHome();
+}
 let currentTheme = "dark";
 let tabsVisible = true;
 let lastLoggedSessionId = null;
 let lastFilesMobileLayout = isMobileFilesLayout();
+let renderFn = null;
 
 const ACE_LIGHT_THEME = "ace/theme/tomorrow_night";
 const ACE_DARK_THEME = "ace/theme/tomorrow_night";
@@ -4030,6 +4124,7 @@ const fetchConfig = async () => {
   const configData = await response.json();
   const adminNpubNormalized = normaliseNpubValue(configData?.adminNpub ?? null);
   state.config = { ...configData, adminNpub: adminNpubNormalized ?? null };
+  const identityInfo = configData && typeof configData.identity === "object" ? configData.identity : null;
   agentSelect.innerHTML = "";
   state.config.agents.forEach((agent) => {
     const option = document.createElement("option");
@@ -4055,7 +4150,24 @@ const fetchConfig = async () => {
     directoryInput.placeholder = state.config.defaultDirectory ?? "";
     scheduleDirectorySuggestions(initial);
   }
-  updateIdentityState({ npub: state.identity.npub }, { persist: false, emit: true });
+  if (identityInfo) {
+    const identityUpdate = {};
+    if (typeof identityInfo.npub === "string") {
+      identityUpdate.npub = identityInfo.npub;
+    }
+    if (typeof identityInfo.alias === "string") {
+      identityUpdate.alias = identityInfo.alias;
+    }
+    if (Array.isArray(identityInfo.roles)) {
+      identityUpdate.roles = identityInfo.roles;
+    }
+    if ("onboarded" in identityInfo) {
+      identityUpdate.onboarded = Boolean(identityInfo.onboarded);
+    }
+    updateIdentityState(identityUpdate, { persist: true, emit: true });
+  } else {
+    updateIdentityState({ npub: state.identity.npub }, { persist: false, emit: true });
+  }
 };
 
 const fetchSessions = async () => {
@@ -4075,6 +4187,17 @@ const fetchSessions = async () => {
         window.history.replaceState({ route: "home" }, "", "/home");
       }
     }
+    return;
+  }
+  if (response.status === 403) {
+    state.sessions = [];
+    state.identitySummaries = [];
+    state.sessionFilters.options = [];
+    state.sessionFilters.npub = "all";
+    state.activeSessionId = null;
+    state.lastActiveSessionId = null;
+    updateIdentityState({ onboarded: false }, { persist: true, emit: true });
+    enforceRouteAccessAndRender();
     return;
   }
   if (!response.ok) {
@@ -4223,6 +4346,18 @@ const fetchApps = async ({ tail = APP_LOG_PREVIEW_LINES } = {}) => {
   try {
     const response = await fetch(`/api/apps?tail=${encodeURIComponent(String(tail))}`);
     const payload = await response.json().catch(() => null);
+    if (response.status === 403) {
+      state.apps.items = [];
+      state.apps.error =
+        (payload && typeof payload === "object" && typeof payload.error === "string" && payload.error.length > 0
+          ? payload.error
+          : "Awaiting onboarding approval from an administrator.");
+      state.apps.loading = false;
+      state.apps.initialized = true;
+      updateIdentityState({ onboarded: false }, { persist: true, emit: true });
+      enforceRouteAccessAndRender();
+      return;
+    }
     if (!response.ok) {
       const errorMessage =
         payload && typeof payload === "object" && typeof payload.error === "string" && payload.error.length > 0
@@ -6608,6 +6743,17 @@ const renderHomeGuestQuote = () => {
   return card;
 };
 
+const renderHomeAwaitingOnboarding = () => {
+  const card = document.createElement("section");
+  card.className = "wm-card wm-home-onboarding";
+  const heading = document.createElement("h2");
+  heading.textContent = "You're almost ready";
+  const message = document.createElement("p");
+  message.textContent = "We're just waiting on the admin to onboard you and give you access.";
+  card.append(heading, message);
+  return card;
+};
+
 const renderHome = () => {
   const wrapper = document.createElement("div");
   wrapper.className = "wm-home";
@@ -6616,6 +6762,11 @@ const renderHome = () => {
 
   if (!state.identity.authenticated) {
     wrapper.append(renderHomeGuestQuote());
+    return wrapper;
+  }
+
+  if (!hasWorkspaceAccess()) {
+    wrapper.append(renderHomeAwaitingOnboarding());
     return wrapper;
   }
 
@@ -8459,6 +8610,8 @@ const render = () => {
   }
 };
 
+renderFn = render;
+
 const handleTouchStart = (event) => {
   if (!pullRefreshIndicator || pullRefreshing) return;
   if (document.body.dataset.menuOpen === "true") return;
@@ -8538,6 +8691,11 @@ navLinks.forEach((link) => {
     if (!targetRoute || targetRoute === currentRoute) return;
     if (!state.identity.authenticated) {
       openIdentityLoginDialog();
+      return;
+    }
+    if (!hasWorkspaceAccess() && targetRoute !== "home" && targetRoute !== "settings") {
+      redirectToHome();
+      render();
       return;
     }
     closeMenu();
@@ -8812,6 +8970,9 @@ window.addEventListener("popstate", () => {
     }
   } else if (currentRoute === "apps") {
     void ensureAppsLoaded();
+  }
+  if (enforceRouteAccessAndRender()) {
+    return;
   }
   render();
 });
