@@ -4477,35 +4477,6 @@ const handleApi = async (
       return denied;
     }
     const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
-    if (!viewerOnboarded && !viewerIsAdmin) {
-      const identitySummaries =
-        viewerNormalizedNpub && authContext.npub
-          ? (() => {
-              const segment = deriveNpubSegment(authContext.npub);
-              return [
-                {
-                  npub: authContext.npub,
-                  normalizedNpub: viewerNormalizedNpub,
-                  segment,
-                  alias: generateIdentityAlias(authContext.npub),
-                  sessionIds: [],
-                  activeSessionIds: [],
-                  lastSeenAt: null,
-                  dataRoot: normalize(join(userIdentityRoot, segment)),
-                  logsRoot: normalize(join(userIdentityRoot, segment, "logs")),
-                  attachmentsRoot: normalize(join(attachmentRoot, segment)),
-                  imagesRoot: normalize(join(imageRoot, segment)),
-                },
-              ];
-            })()
-          : [];
-      return Response.json({
-        sessions: [],
-        identities: identitySummaries,
-        filters: { npubs: [], active: null },
-        onboardingRequired: true,
-      });
-    }
     const allSessions = manager.listSessions();
     const accessibleSessions = viewerIsAdmin
       ? allSessions

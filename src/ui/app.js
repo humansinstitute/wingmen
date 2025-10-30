@@ -4246,17 +4246,6 @@ const fetchSessions = async () => {
     return;
   }
   const data = await response.json();
-  if (data?.onboardingRequired) {
-    state.sessions = [];
-    state.identitySummaries = Array.isArray(data.identities) ? data.identities : [];
-    state.sessionFilters.options = [];
-    state.sessionFilters.npub = "all";
-    state.activeSessionId = null;
-    state.lastActiveSessionId = null;
-    updateIdentityState({ onboarded: false }, { persist: true, emit: true });
-    enforceRouteAccessAndRender();
-    return;
-  }
   state.sessions = Array.isArray(data.sessions) ? data.sessions : [];
   state.identitySummaries = Array.isArray(data.identities) ? data.identities : [];
   const currentAlias = state.identity.npub
