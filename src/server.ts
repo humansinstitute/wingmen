@@ -3193,7 +3193,6 @@ const requireOnboardedAccess = (): AccessRule => {
   return (context) => (isOnboardedContext(context.auth) ? allow() : deny("onboarding-required", 403));
 };
 
-registerAccessRule(AccessActions.SessionsManage, requireOnboardedAccess());
 registerAccessRule(AccessActions.FilesRead, requireOnboardedAccess());
 registerAccessRule(AccessActions.FilesWrite, requireOnboardedAccess());
 registerAccessRule(AccessActions.AppsManage, requireOnboardedAccess());
@@ -3244,6 +3243,8 @@ const handleApi = async (
 ): Promise<Response> => {
   const pathname = url.pathname;
   const workspaceScope = resolveWorkspace(authContext);
+  const viewerIsAdmin = isAdminContext(authContext);
+  const viewerOnboarded = isOnboardedContext(authContext);
   if (pathname === "/api/system/restart/status" && method === "GET") {
     const denied = await ensureApiAccess(AccessActions.SystemManage, request, url, authContext);
     if (denied) {
@@ -4476,7 +4477,35 @@ const handleApi = async (
       return denied;
     }
     const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
-    const viewerIsAdmin = Boolean(adminNpub && viewerNormalizedNpub && viewerNormalizedNpub === adminNpub);
+    if (!viewerOnboarded && !viewerIsAdmin) {
+      const identitySummaries =
+        viewerNormalizedNpub && authContext.npub
+          ? (() => {
+              const segment = deriveNpubSegment(authContext.npub);
+              return [
+                {
+                  npub: authContext.npub,
+                  normalizedNpub: viewerNormalizedNpub,
+                  segment,
+                  alias: generateIdentityAlias(authContext.npub),
+                  sessionIds: [],
+                  activeSessionIds: [],
+                  lastSeenAt: null,
+                  dataRoot: normalize(join(userIdentityRoot, segment)),
+                  logsRoot: normalize(join(userIdentityRoot, segment, "logs")),
+                  attachmentsRoot: normalize(join(attachmentRoot, segment)),
+                  imagesRoot: normalize(join(imageRoot, segment)),
+                },
+              ];
+            })()
+          : [];
+      return Response.json({
+        sessions: [],
+        identities: identitySummaries,
+        filters: { npubs: [], active: null },
+        onboardingRequired: true,
+      });
+    }
     const allSessions = manager.listSessions();
     const accessibleSessions = viewerIsAdmin
       ? allSessions
@@ -4597,6 +4626,9 @@ const handleApi = async (
     if (denied) {
       return denied;
     }
+    if (!viewerOnboarded) {
+      return Response.json({ error: "onboarding-required" }, { status: 403 });
+    }
     try {
       const payload = await request.json();
       const agent = typeof payload?.agent === "string" ? payload.agent.toLowerCase() : "";
@@ -4640,6 +4672,9 @@ const handleApi = async (
     const denied = await ensureApiAccess(AccessActions.SessionsManage, request, url, authContext);
     if (denied) {
       return denied;
+    }
+    if (!viewerOnboarded) {
+      return Response.json({ error: "onboarding-required" }, { status: 403 });
     }
     const parts = pathname.split("/");
     const id = parts[3];
