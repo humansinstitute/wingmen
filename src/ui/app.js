@@ -7995,9 +7995,11 @@ function renderAdminUsersPanel() {
   searchInput.className = "wm-admin-users__filter-search";
   searchInput.placeholder = "Search alias…";
   searchInput.value = filters.query ?? "";
-  searchInput.addEventListener("input", () => {
-    state.adminUsers.filters.query = searchInput.value;
-    render();
+  searchInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      state.adminUsers.filters.query = searchInput.value;
+      render();
+    }
   });
 
   filterBar.append(onboardFilter, searchInput);
