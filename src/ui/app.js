@@ -606,6 +606,14 @@ const updateIdentityState = (partial, { persist = true, emit = true } = {}) => {
     enforceRouteAccess();
   }
 
+  if (hasWorkspaceAccess()) {
+    stopOnboardingPolling();
+  } else if (next.authenticated) {
+    startOnboardingPolling();
+  } else {
+    stopOnboardingPolling();
+  }
+
   if (emit && typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
     try {
       window.dispatchEvent(new CustomEvent("wingman:identity-ui-state", { detail: { ...next } }));
@@ -2731,6 +2739,34 @@ const enforceRouteAccess = () => {
   return false;
 };
 
+const stopOnboardingPolling = () => {
+  if (onboardingPollIntervalId !== null) {
+    clearInterval(onboardingPollIntervalId);
+    onboardingPollIntervalId = null;
+  }
+};
+
+const startOnboardingPolling = () => {
+  stopOnboardingPolling();
+  if (hasWorkspaceAccess() || !state.identity.authenticated) {
+    return;
+  }
+  const poll = async () => {
+    try {
+      await fetchConfig();
+      if (hasWorkspaceAccess()) {
+        stopOnboardingPolling();
+        if (typeof renderFn === "function") {
+          renderFn();
+        }
+      }
+    } catch {
+      // ignore polling errors
+    }
+  };
+  onboardingPollIntervalId = window.setInterval(poll, 5000);
+};
+
 const enforceRouteAccessAndRender = () => {
   const redirected = enforceRouteAccess();
   if (redirected && typeof renderFn === "function") {
@@ -2755,6 +2791,7 @@ let tabsVisible = true;
 let lastLoggedSessionId = null;
 let lastFilesMobileLayout = isMobileFilesLayout();
 let renderFn = null;
+let onboardingPollIntervalId = null;
 
 const ACE_LIGHT_THEME = "ace/theme/tomorrow_night";
 const ACE_DARK_THEME = "ace/theme/tomorrow_night";
