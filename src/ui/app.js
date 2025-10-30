@@ -2768,6 +2768,7 @@ const startOnboardingPolling = () => {
       // ignore polling errors
     }
   };
+  void poll();
   onboardingPollIntervalId = window.setInterval(poll, 5000);
 };
 
