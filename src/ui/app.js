@@ -6861,10 +6861,6 @@ const renderHome = () => {
   orchestratorHeaderActions.className = "wm-home-section-actions";
   orchestratorHeaderActions.append(orchestratorCreateButton);
 
-  const orchestratorActions = document.createElement("div");
-  orchestratorActions.className = "wm-home-orchestrator-actions";
-  renderOrchestratorPresetButtons(orchestratorActions);
-
   if (!state.orchestratorPresetsLoaded && !state.orchestratorPresetsLoading) {
     ensureOrchestratorPresetsLoaded();
   }
@@ -6877,7 +6873,17 @@ const renderHome = () => {
   });
 
   orchestratorHeader.append(orchestratorTitle, orchestratorHeaderActions);
-  orchestratorContent.append(orchestratorActions);
+  if (state.identity.isAdmin) {
+    const orchestratorActions = document.createElement("div");
+    orchestratorActions.className = "wm-home-orchestrator-actions";
+    renderOrchestratorPresetButtons(orchestratorActions);
+    orchestratorContent.append(orchestratorActions);
+  } else {
+    const notice = document.createElement("p");
+    notice.className = "wm-home-orchestrator-notice";
+    notice.textContent = "Orchestrator presets require admin access.";
+    orchestratorContent.append(notice);
+  }
   orchestratorCard.append(orchestratorHeader, orchestratorContent);
   setOrchestratorCollapsed(false);
 

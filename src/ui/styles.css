@@ -2683,6 +2683,32 @@ dialog textarea {
   color: var(--text-tertiary);
 }
 
+.wm-admin-users__filters {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 1rem;
+  flex-wrap: wrap;
+}
+
+.wm-admin-users__filter-select {
+  min-width: 160px;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.wm-admin-users__filter-search {
+  flex: 1;
+  min-width: 200px;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.6rem;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
 .wm-home-onboarding {
   text-align: center;
   padding: 2.5rem 2rem;
@@ -2695,6 +2721,12 @@ dialog textarea {
 .wm-home-onboarding p {
   margin: 0;
   color: var(--text-tertiary);
+}
+
+.wm-home-orchestrator-notice {
+  margin: 1rem 0 0;
+  color: var(--text-tertiary);
+  text-align: center;
 }
 
 @media (min-width: 640px) {
@@ -2723,6 +2755,10 @@ dialog textarea {
 
   .wm-admin-users__toggle {
     justify-content: flex-start;
+  }
+
+  .wm-admin-users__filter-search {
+    flex-basis: 100%;
   }
 }
 

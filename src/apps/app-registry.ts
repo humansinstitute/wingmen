@@ -14,6 +14,8 @@ export interface AppRecord {
   root: string;
   scripts: AppLifecycleScripts;
   tmuxSession: string;
+  ownerNpub: string | null;
+  ownerNormalizedNpub: string | null;
   notes?: string;
   createdAt: string;
   updatedAt: string;
@@ -25,6 +27,8 @@ export interface RegisterAppInput {
   root: string;
   scripts?: AppLifecycleScripts;
   tmuxSession?: string;
+  ownerNpub?: string | null;
+  ownerNormalizedNpub?: string | null;
   notes?: string;
 }
 
@@ -33,6 +37,8 @@ export interface UpdateAppInput {
   root?: string;
   scripts?: AppLifecycleScripts;
   tmuxSession?: string;
+  ownerNpub?: string | null;
+  ownerNormalizedNpub?: string | null;
   notes?: string | null;
 }
 
@@ -96,12 +102,16 @@ export class AppRegistry {
     const label = input.label?.trim() || basename(root);
     const tmuxSession = normaliseWindowName(input.tmuxSession, label, root, id);
     const scripts = this.normaliseScripts(input.scripts);
+    const ownerNormalized = input.ownerNormalizedNpub?.trim() || null;
+    const ownerNpub = input.ownerNpub?.trim() || null;
     const record: AppRecord = {
       id,
       label,
       root,
       scripts,
       tmuxSession,
+      ownerNpub: ownerNpub ?? (ownerNormalized ? ownerNormalized : null),
+      ownerNormalizedNpub: ownerNormalized,
       notes: input.notes?.trim() || undefined,
       createdAt: now,
       updatedAt: now,
@@ -122,12 +132,16 @@ export class AppRegistry {
     const nextScripts = input.scripts ? this.normaliseScripts(input.scripts) : existing.scripts;
     const nextNotes = input.notes === null ? undefined : input.notes?.trim() || existing.notes;
     const nextTmux = normaliseWindowName(input.tmuxSession ?? existing.tmuxSession, nextLabel, nextRoot, id);
+    const nextOwnerNormalized = input.ownerNormalizedNpub?.trim() ?? existing.ownerNormalizedNpub ?? null;
+    const nextOwnerNpub = input.ownerNpub?.trim() ?? existing.ownerNpub ?? (nextOwnerNormalized ?? null);
     const next: AppRecord = {
       ...existing,
       label: nextLabel,
       root: nextRoot,
       scripts: nextScripts,
       tmuxSession: nextTmux,
+      ownerNpub: nextOwnerNpub,
+      ownerNormalizedNpub: nextOwnerNormalized,
       notes: nextNotes,
       updatedAt: new Date().toISOString(),
     };
@@ -244,12 +258,15 @@ export class AppRegistry {
     const tmuxSession = normaliseWindowName(input.tmuxSession, label, root, input.id);
     const scripts = this.normaliseScripts(input.scripts);
     const notes = input.notes?.trim() || undefined;
+    const ownerNormalized = input.ownerNormalizedNpub ?? input.ownerNpub ?? null;
     return {
       id: input.id,
       label,
       root,
       scripts,
       tmuxSession,
+      ownerNpub: input.ownerNpub ?? ownerNormalized,
+      ownerNormalizedNpub: ownerNormalized,
       notes,
       createdAt,
       updatedAt,

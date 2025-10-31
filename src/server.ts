@@ -3001,6 +3001,10 @@ const buildAppResponse = (app: AppRecord, status: AppProcessStatus) => {
     scripts: app.scripts,
     tmuxSession: APPS_TMUX_SESSION,
     tmuxWindow: app.tmuxSession,
+    owner: {
+      npub: app.ownerNpub,
+      normalizedNpub: app.ownerNormalizedNpub,
+    },
     notes: app.notes ?? null,
     createdAt: app.createdAt,
     updatedAt: app.updatedAt,
@@ -3492,10 +3496,18 @@ const handleApi = async (
     const tail = tailParam ? Number.parseInt(tailParam, 10) : 0;
     const includeLogs = Number.isFinite(tail) && tail > 0;
     const tailCount = includeLogs ? Math.min(Math.max(tail, 1), 2000) : 0;
+    const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
     try {
       const [apps, statuses] = await Promise.all([appRegistry.listApps(), appProcessManager.listStatuses()]);
-      const visibleApps = workspaceScope.isAdmin ? apps : apps.filter((app) => app.id !== "wingman-core");
-      const statusMap = new Map(statuses.map((status) => [status.appId, status]));
+      const visibleApps = apps.filter((app) => {
+        if (viewerIsAdmin) return true;
+        if (app.ownerNormalizedNpub) {
+          return viewerNormalizedNpub && app.ownerNormalizedNpub === viewerNormalizedNpub;
+        }
+        return false;
+      });
+      const visibleIds = new Set(visibleApps.map((app) => app.id));
+      const statusMap = new Map(statuses.filter((status) => visibleIds.has(status.appId)).map((status) => [status.appId, status]));
       const data = await Promise.all(
         visibleApps.map(async (app) => {
           const status = statusMap.get(app.id) ?? defaultAppProcessStatus(app.id);
@@ -3521,6 +3533,7 @@ const handleApi = async (
     if (denied) {
       return denied;
     }
+    const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
     let payload: unknown;
     try {
       payload = await request.json();
@@ -3570,12 +3583,21 @@ const handleApi = async (
       }
     }
 
+    if (!viewerOnboarded && !viewerIsAdmin) {
+      return Response.json({ error: "onboarding-required" }, { status: 403 });
+    }
+    if (!viewerNormalizedNpub && !viewerIsAdmin) {
+      return Response.json({ error: "Authentication required" }, { status: 401 });
+    }
+
     try {
       const app = await appRegistry.registerApp({
         label: label ?? "",
         root: resolvedRoot,
         scripts: Object.keys(scripts).length > 0 ? scripts : undefined,
         tmuxSession: tmuxSession ?? undefined,
+        ownerNpub: authContext.npub ?? viewerNormalizedNpub ?? null,
+        ownerNormalizedNpub: viewerNormalizedNpub ?? null,
         notes: notes ?? undefined,
       });
       const status = await appProcessManager.getStatus(app.id);
@@ -3613,14 +3635,17 @@ const handleApi = async (
     if (!id) {
       return Response.json({ error: "App id is required" }, { status: 400 });
     }
-    if (!workspaceScope.isAdmin && id === "wingman-core") {
-      return Response.json({ error: "Not found" }, { status: 404 });
-    }
+    const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
 
     if (method === "GET" && parts.length === 4) {
       const app = await appRegistry.getApp(id);
       if (!app) {
         return Response.json({ error: "Not found" }, { status: 404 });
+      }
+      if (!viewerIsAdmin) {
+        if (!viewerNormalizedNpub || app.ownerNormalizedNpub !== viewerNormalizedNpub) {
+          return Response.json({ error: "Not found" }, { status: 404 });
+        }
       }
       const status = await appProcessManager.getStatus(id);
       return Response.json({ app: buildAppResponse(app, status) });
@@ -3630,6 +3655,11 @@ const handleApi = async (
       const current = await appRegistry.getApp(id);
       if (!current) {
         return Response.json({ error: "Not found" }, { status: 404 });
+      }
+      if (!viewerIsAdmin) {
+        if (!viewerNormalizedNpub || current.ownerNormalizedNpub !== viewerNormalizedNpub) {
+          return Response.json({ error: "Not found" }, { status: 404 });
+        }
       }
 
       let payload: unknown;
@@ -3708,6 +3738,16 @@ const handleApi = async (
     }
 
     if (method === "DELETE" && parts.length === 4) {
+      const app = await appRegistry.getApp(id);
+      if (!app) {
+        return Response.json({ error: "Not found" }, { status: 404 });
+      }
+      if (!viewerIsAdmin) {
+        const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
+        if (!viewerNormalizedNpub || app.ownerNormalizedNpub !== viewerNormalizedNpub) {
+          return Response.json({ error: "Not found" }, { status: 404 });
+        }
+      }
       const killParam = url.searchParams.get("killSession") ?? url.searchParams.get("killTmux");
       const killSession = parseBooleanFlag(killParam);
       try {
@@ -3731,6 +3771,12 @@ const handleApi = async (
       if (!app) {
         return Response.json({ error: "Not found" }, { status: 404 });
       }
+      if (!viewerIsAdmin) {
+        const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
+        if (!viewerNormalizedNpub || app.ownerNormalizedNpub !== viewerNormalizedNpub) {
+          return Response.json({ error: "Not found" }, { status: 404 });
+        }
+      }
       const tailParam = url.searchParams.get("tail");
       const tail = tailParam ? Number.parseInt(tailParam, 10) : 100;
       const lines = Number.isNaN(tail) || tail <= 0 ? 100 : Math.min(tail, 2000);
@@ -3746,6 +3792,12 @@ const handleApi = async (
       const app = await appRegistry.getApp(id);
       if (!app) {
         return Response.json({ error: "Not found" }, { status: 404 });
+      }
+      if (!viewerIsAdmin) {
+        const viewerNormalizedNpub = getViewerNormalizedNpub(authContext);
+        if (!viewerNormalizedNpub || app.ownerNormalizedNpub !== viewerNormalizedNpub) {
+          return Response.json({ error: "Not found" }, { status: 404 });
+        }
       }
       let payload: unknown;
       try {
